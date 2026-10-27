@@ -21,7 +21,7 @@ The relay only types into sessions that are already running. Model, effort and a
 1. Press `prefix+a` in the tab.
 2. The PR is the one `gh pr view` finds for Engineering's checkout. If gh finds none, it is the last PR link Engineering wrote in its session.
 3. Each QA pane gets its review command (`reviewPrompt`). A QA pane that already reviewed in its current session gets `/clear` first.
-4. The relay waits until every QA agent is done. When one stops at a question or an approval, you get a notification, and the wait goes on once you have answered. For Claude Code, done needs more than herdr reporting idle. Its transcript must also show no background task still running and a closed turn, because the agent goes idle while it waits for a background task such as a CI watch.
+4. The relay waits until every QA agent is done. When one stops at a question or an approval, you get a notification, and the wait goes on once you have answered; the time it waits for you does not count against the timeout. For Claude Code, done needs more than herdr reporting idle. Its transcript must also show no background task still running and a closed turn, because the agent goes idle while it waits for a background task such as a CI watch or a background sub-agent. A task that never reports (a dev server, a stopped shell) is given up once the agent has sat idle on it alone for `backgroundGraceMinutes`; the run log names it.
 5. Engineering gets `handoffIntro`, followed by each review in a `<review from="QA #1" agent="Claude Code">` block.
 6. Once Engineering is done, it gets `followUp`. When that has finished too, you get a "ready for you" notification.
 
@@ -75,11 +75,12 @@ command = "review-relay.copy"
   "handoffIntro": "Here is the feedback from {count} independent QA agents on PR #{pr}. Check the feedback and fix issues.",
   "followUp": "/goal green ci, no merge conflicts and mergeable",
   "reviewTimeoutMinutes": 90,
-  "engineeringTimeoutMinutes": 240
+  "engineeringTimeoutMinutes": 240,
+  "backgroundGraceMinutes": 30
 }
 ```
 
-Set `followUp` to `null` to skip it.
+Set `followUp` to `null` to skip it. `qaLabelPattern` needs a capture group for the QA number.
 
 ## Development
 

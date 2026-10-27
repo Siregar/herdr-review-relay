@@ -3,15 +3,32 @@ import { test } from 'node:test';
 import { DEFAULTS, parseConfig } from '../src/config.ts';
 import { buildHandoff, fill } from '../src/handoff.ts';
 import { parseIntegrationStatus } from '../src/herdr.ts';
-import { lastPullRequestNumber } from '../src/pr.ts';
+import { isNoPullRequest, sessionPullRequest } from '../src/pr.ts';
 import { needsClear } from '../src/state.ts';
 
 test('the PR is the last pull request link in the text, issue links do not count', () => {
   const reply =
     'Opened https://github.com/kigumi-ui/kigumi-cli/pull/229, superseded by ' +
     'https://github.com/kigumi-ui/kigumi-cli/pull/231. Closes https://github.com/kigumi-ui/kigumi-cli/issues/240.';
-  assert.equal(lastPullRequestNumber(reply), 231);
-  assert.equal(lastPullRequestNumber('Draft-PR #231 is open'), null);
+  assert.equal(sessionPullRequest(reply, 'kigumi-ui/kigumi-cli'), 'https://github.com/kigumi-ui/kigumi-cli/pull/231');
+  assert.equal(sessionPullRequest('Draft-PR #231 is open', 'kigumi-ui/kigumi-cli'), null);
+});
+
+test('a session PR from another repository is refused, not looked up in this one', () => {
+  const reply = 'Opened https://github.com/kigumi-ui/kigumi-cli/pull/231, it needs https://github.com/shoelace-style/webawesome/pull/12.';
+  assert.throws(() => sessionPullRequest(reply, 'kigumi-ui/kigumi-cli'), /shoelace-style\/webawesome.*kigumi-ui\/kigumi-cli/);
+  assert.equal(
+    sessionPullRequest('See https://github.com/Kigumi-UI/Kigumi-CLI/pull/7', 'kigumi-ui/kigumi-cli'),
+    'https://github.com/Kigumi-UI/Kigumi-CLI/pull/7',
+    'GitHub names are not case sensitive',
+  );
+});
+
+test('only "no PR for this branch" lets the PR lookup fall back to the session', () => {
+  assert.equal(isNoPullRequest('no pull requests found for branch "fix/x"'), true);
+  assert.equal(isNoPullRequest('could not determine current branch: failed to run git: not on any branch'), true);
+  assert.equal(isNoPullRequest('HTTP 401: Bad credentials (https://api.github.com/graphql)'), false);
+  assert.equal(isNoPullRequest('error connecting to api.github.com'), false);
 });
 
 test('fill replaces known placeholders and keeps unknown ones', () => {
@@ -44,6 +61,18 @@ test('config: wrong types and invalid patterns are refused', () => {
   assert.throws(() => parseConfig({ engineeringLabel: '' }), /engineeringLabel/);
   assert.throws(() => parseConfig({ qaLabelPattern: '(' }), /qaLabelPattern/);
   assert.throws(() => parseConfig([]), /\(root\)/);
+  assert.throws(() => parseConfig({ backgroundGraceMinutes: 0 }), /backgroundGraceMinutes/);
+});
+
+test('config: a QA label pattern needs a capture group for the QA number', () => {
+  assert.throws(() => parseConfig({ qaLabelPattern: '^QA' }), /qaLabelPattern.*capture group/);
+  assert.throws(() => parseConfig({ qaLabelPattern: '^QA (?:#\\d+)$' }), /qaLabelPattern.*capture group/);
+  assert.equal(parseConfig({ qaLabelPattern: '^Review (\\d+)$' }).qaLabelPattern, '^Review (\\d+)$');
+});
+
+test('config: the background grace period has a default and can be set', () => {
+  assert.equal(DEFAULTS.backgroundGraceMinutes, 30);
+  assert.equal(parseConfig({ backgroundGraceMinutes: 45 }).backgroundGraceMinutes, 45);
 });
 
 test('/clear only for the session a pane already reviewed in', () => {

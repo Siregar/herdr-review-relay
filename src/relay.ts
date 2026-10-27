@@ -9,25 +9,25 @@ import {
   notify,
   prompt,
   promptAndWait,
-  type AgentStatus,
   type Pane,
 } from './herdr.ts';
 import { findPullRequest, type PullRequest } from './pr.ts';
 import { readLastReply, readTurnState } from './replies.ts';
 import { AGENT_NAMES, RelayError, resolveRoles, type Role } from './roles.ts';
 import { acquireLock, archive, loadReviews, needsClear, saveReviews, type ReviewRecords } from './state.ts';
-
-const MINUTE = 60_000;
-const POLL_MS = 10_000;
-/** How long an idle agent may show an open turn before the relay takes idle as final. */
-const OPEN_TURN_GRACE_MS = 2 * MINUTE;
+import { waitUntilReady } from './wait.ts';
 
 function log(message: string): void {
   console.log(`${new Date().toISOString()} ${message}`);
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const cwdOf = (pane: Pane): string => pane.foreground_cwd ?? pane.cwd;
+
+/** Notifications are best effort: one that fails is logged and the run goes on. */
+async function tryNotify(...args: Parameters<typeof notify>): Promise<void> {
+  await notify(...args).catch((error: Error) => log(`notification failed: ${error.message}`));
+}
 
 /** Fails before anything is sent when herdr cannot tell us an agent's session. */
 async function checkIntegrations(roles: Role[]): Promise<void> {
@@ -39,60 +39,24 @@ async function checkIntegrations(roles: Role[]): Promise<void> {
   }
 }
 
-function deadline(minutes: number): () => number {
-  const end = Date.now() + minutes * MINUTE;
-  return () => {
-    const left = end - Date.now();
-    if (left <= 0) throw new RelayError(`Timed out after ${minutes} minutes`);
-    return left;
-  };
-}
-
-/**
- * Sends the text and waits until the agent has finished. Idle is not enough on its own: Claude Code
- * goes idle while a background task runs and wakes up when it reports, so its transcript must show
- * no pending background task and a closed turn too. While the agent waits at a question or an
- * approval, the user gets a notification; the wait goes on once they have answered.
- */
-async function promptUntilReady(role: Role, text: string, remaining: () => number, tag: string): Promise<void> {
+/** Sends the text and waits until the agent has finished; see `waitUntilReady`. */
+async function promptUntilReady(role: Role, text: string, timeoutMinutes: number, config: Config, tag: string): Promise<void> {
   const id = role.pane.pane_id;
-  const sentAt = Date.now();
-  let status: AgentStatus = await promptAndWait(id, text, remaining());
-  let blockedNoticeSent = false;
-  let idleSince: number | null = null;
-  let waitingOn = '';
-  for (;;) {
-    if (status === 'blocked') {
-      if (!blockedNoticeSent) {
-        log(`${role.title} is blocked`);
-        await notify(`${tag}: ${role.title} needs you`, 'It is waiting at a question or an approval.', 'request');
-        blockedNoticeSent = true;
-      }
-      idleSince = null;
-    } else if (status === 'idle' || status === 'done') {
-      blockedNoticeSent = false;
-      idleSince ??= Date.now();
-      const sessionId = (await getAgent(id)).agent_session?.value;
-      const turn = sessionId ? await readTurnState(role.kind, sessionId, sentAt) : null;
-      if (!turn) return;
-      // A turn without an end marker would otherwise hold the relay until its deadline.
-      const busy =
-        turn.pendingBackground.length > 0
-          ? `${turn.pendingBackground.length} background task(s) running`
-          : turn.turnOpen && Date.now() - idleSince < OPEN_TURN_GRACE_MS
-            ? 'an unfinished turn'
-            : '';
-      if (!busy) return;
-      if (busy !== waitingOn) log(`${role.title} is idle with ${busy}; waiting`);
-      waitingOn = busy;
-    } else {
-      blockedNoticeSent = false;
-      idleSince = null;
-    }
-    remaining(); // Throws once the deadline has passed.
-    await sleep(POLL_MS);
-    status = (await getAgent(id)).agent_status ?? 'unknown';
-  }
+  await waitUntilReady(
+    {
+      send: (timeoutMs) => promptAndWait(id, text, timeoutMs),
+      status: async () => (await getAgent(id)).agent_status ?? 'unknown',
+      turn: async (since) => {
+        const sessionId = (await getAgent(id)).agent_session?.value;
+        return sessionId ? readTurnState(role.kind, sessionId, since) : null;
+      },
+      now: Date.now,
+      sleep,
+      notify,
+      log,
+    },
+    { title: role.title, tag, timeoutMinutes, backgroundGraceMinutes: config.backgroundGraceMinutes },
+  );
 }
 
 /** /clear, then wait until a Claude Code pane reports its new session so the review lands in it. */
@@ -112,6 +76,7 @@ async function review(
   pr: PullRequest,
   config: Config,
   records: ReviewRecords,
+  reviewed: ReviewRecords,
   tag: string,
 ): Promise<Review> {
   if (needsClear(records[role.pane.pane_id], role.pane.agent_session?.value)) {
@@ -121,7 +86,7 @@ async function review(
   const reviewPrompt = fill(config.reviewPrompt[role.kind], { pr: pr.number });
   const sentAt = Date.now();
   log(`${role.title}: ${reviewPrompt}`);
-  await promptUntilReady(role, reviewPrompt, deadline(config.reviewTimeoutMinutes), tag);
+  await promptUntilReady(role, reviewPrompt, config.reviewTimeoutMinutes, config, tag);
 
   const sessionId = (await getAgent(role.pane.pane_id)).agent_session?.value;
   if (!sessionId) throw new RelayError(`${role.title}: herdr reports no session for this ${AGENT_NAMES[role.kind]} pane`);
@@ -130,7 +95,7 @@ async function review(
     throw new RelayError(`${role.title} finished without a reply to the review prompt; its pane shows why (a failed model call, a usage limit)`);
   }
 
-  records[role.pane.pane_id] = { sessionId, pr: pr.number, at: new Date().toISOString() };
+  reviewed[role.pane.pane_id] = { sessionId, pr: pr.number, at: new Date().toISOString() };
   log(`${role.title}: reply has ${text.length} characters`);
   return { title: role.title, agent: AGENT_NAMES[role.kind], text };
 }
@@ -177,9 +142,10 @@ async function run(invokingPaneId: string, dryRun: boolean): Promise<void> {
 
   const release = await acquireLock(roles.engineering.pane.tab_id);
   try {
-    await notify(`${tag}: review started`, roles.qa.map((role) => role.title).join(', '));
-    const results = await Promise.allSettled(roles.qa.map((role) => review(role, pr, config, records, tag)));
-    await saveReviews(records);
+    await tryNotify(`${tag}: review started`, roles.qa.map((role) => role.title).join(', '));
+    const reviewed: ReviewRecords = {};
+    const results = await Promise.allSettled(roles.qa.map((role) => review(role, pr, config, records, reviewed, tag)));
+    await saveReviews(reviewed);
 
     const reviews = results.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
     const failures = results.flatMap((result, index) =>
@@ -194,12 +160,12 @@ async function run(invokingPaneId: string, dryRun: boolean): Promise<void> {
     }
 
     log(`${roles.engineering.title}: handoff, ${handoff.length} characters`);
-    await promptUntilReady(roles.engineering, handoff, deadline(config.engineeringTimeoutMinutes), tag);
+    await promptUntilReady(roles.engineering, handoff, config.engineeringTimeoutMinutes, config, tag);
     if (config.followUp) {
       log(`${roles.engineering.title}: ${config.followUp}`);
-      await promptUntilReady(roles.engineering, fill(config.followUp, { pr: pr.number }), deadline(config.engineeringTimeoutMinutes), tag);
+      await promptUntilReady(roles.engineering, fill(config.followUp, { pr: pr.number }), config.engineeringTimeoutMinutes, config, tag);
     }
-    await notify(`${tag} is ready for you`, 'QA feedback is worked in and the follow-up has finished.', 'done');
+    await tryNotify(`${tag} is ready for you`, 'QA feedback is worked in and the follow-up has finished.', 'done');
     log('done');
   } finally {
     await release();
