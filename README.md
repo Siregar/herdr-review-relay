@@ -21,7 +21,7 @@ The relay only types into sessions that are already running. Model, effort and a
 1. Press `prefix+a` in the tab.
 2. The PR is the one `gh pr view` finds for Engineering's checkout. If gh finds none, it is the last PR link Engineering wrote in its session.
 3. Each QA pane gets its review command (`reviewPrompt`). A QA pane that already reviewed in its current session gets `/clear` first.
-4. The relay waits until every QA agent is done. When one stops at a question or an approval, you get a notification, and the wait goes on once you have answered.
+4. The relay waits until every QA agent is done. When one stops at a question or an approval, you get a notification, and the wait goes on once you have answered. For Claude Code, done needs more than herdr reporting idle. Its transcript must also show no background task still running and a closed turn, because the agent goes idle while it waits for a background task such as a CI watch.
 5. Engineering gets `handoffIntro`, followed by each review in a `<review from="QA #1" agent="Claude Code">` block.
 6. Once Engineering is done, it gets `followUp`. When that has finished too, you get a "ready for you" notification.
 

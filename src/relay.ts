@@ -9,16 +9,18 @@ import {
   notify,
   prompt,
   promptAndWait,
-  waitFor,
   type AgentStatus,
   type Pane,
 } from './herdr.ts';
 import { findPullRequest, type PullRequest } from './pr.ts';
-import { readLastReply } from './replies.ts';
+import { readLastReply, readTurnState } from './replies.ts';
 import { AGENT_NAMES, RelayError, resolveRoles, type Role } from './roles.ts';
 import { acquireLock, archive, loadReviews, needsClear, saveReviews, type ReviewRecords } from './state.ts';
 
 const MINUTE = 60_000;
+const POLL_MS = 10_000;
+/** How long an idle agent may show an open turn before the relay takes idle as final. */
+const OPEN_TURN_GRACE_MS = 2 * MINUTE;
 
 function log(message: string): void {
   console.log(`${new Date().toISOString()} ${message}`);
@@ -47,17 +49,49 @@ function deadline(minutes: number): () => number {
 }
 
 /**
- * Sends the text and waits until the agent is ready for input again. While it waits at a question
- * or approval, the user gets a notification; the wait goes on once they have answered.
+ * Sends the text and waits until the agent has finished. Idle is not enough on its own: Claude Code
+ * goes idle while a background task runs and wakes up when it reports, so its transcript must show
+ * no pending background task and a closed turn too. While the agent waits at a question or an
+ * approval, the user gets a notification; the wait goes on once they have answered.
  */
 async function promptUntilReady(role: Role, text: string, remaining: () => number, tag: string): Promise<void> {
   const id = role.pane.pane_id;
+  const sentAt = Date.now();
   let status: AgentStatus = await promptAndWait(id, text, remaining());
-  while (status === 'blocked') {
-    log(`${role.title} is blocked`);
-    await notify(`${tag}: ${role.title} needs you`, 'It is waiting at a question or an approval.', 'request');
-    await waitFor(id, ['working', 'idle', 'done'], remaining());
-    status = await waitFor(id, ['idle', 'done', 'blocked'], remaining());
+  let blockedNoticeSent = false;
+  let idleSince: number | null = null;
+  let waitingOn = '';
+  for (;;) {
+    if (status === 'blocked') {
+      if (!blockedNoticeSent) {
+        log(`${role.title} is blocked`);
+        await notify(`${tag}: ${role.title} needs you`, 'It is waiting at a question or an approval.', 'request');
+        blockedNoticeSent = true;
+      }
+      idleSince = null;
+    } else if (status === 'idle' || status === 'done') {
+      blockedNoticeSent = false;
+      idleSince ??= Date.now();
+      const sessionId = (await getAgent(id)).agent_session?.value;
+      const turn = sessionId ? await readTurnState(role.kind, sessionId, sentAt) : null;
+      if (!turn) return;
+      // A turn without an end marker would otherwise hold the relay until its deadline.
+      const busy =
+        turn.pendingBackground.length > 0
+          ? `${turn.pendingBackground.length} background task(s) running`
+          : turn.turnOpen && Date.now() - idleSince < OPEN_TURN_GRACE_MS
+            ? 'an unfinished turn'
+            : '';
+      if (!busy) return;
+      if (busy !== waitingOn) log(`${role.title} is idle with ${busy}; waiting`);
+      waitingOn = busy;
+    } else {
+      blockedNoticeSent = false;
+      idleSince = null;
+    }
+    remaining(); // Throws once the deadline has passed.
+    await sleep(POLL_MS);
+    status = (await getAgent(id)).agent_status ?? 'unknown';
   }
 }
 

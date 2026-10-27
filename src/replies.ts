@@ -13,10 +13,13 @@ const SKEW_MS = 5_000;
 interface ClaudeBlock {
   type: string;
   text?: string;
+  id?: string;
+  input?: { run_in_background?: boolean };
 }
 
 interface ClaudeRow {
   type?: string;
+  subtype?: string;
   timestamp?: string;
   isMeta?: boolean;
   isSidechain?: boolean;
@@ -68,6 +71,41 @@ export function lastClaudeReply(jsonl: string, since: number): string | null {
     }
   }
   return texts.join('\n\n').trim() || null;
+}
+
+export interface TurnState {
+  /** Background tasks started since the prompt whose completion notice has not arrived yet. */
+  pendingBackground: string[];
+  /** Rows were written after the last turn ended: a turn is running, or a notice waits to be handled. */
+  turnOpen: boolean;
+}
+
+/**
+ * Whether a Claude Code agent that looks idle has really finished. It goes idle while a background
+ * task runs (a CI wait, a background sub-agent) and wakes up when the task's
+ * `<task-notification>` arrives, so idle alone ends a wait too early.
+ */
+export function claudeTurnState(jsonl: string, since: number): TurnState {
+  const rows = parseClaudeRows(jsonl).filter((row) => !row.isSidechain);
+  const started: string[] = [];
+  const notified = new Set<string>();
+  for (const row of rows) {
+    const content = row.message?.content;
+    if (row.type === 'assistant' && Array.isArray(content) && Date.parse(row.timestamp ?? '') >= since - SKEW_MS) {
+      for (const block of content) {
+        if (block.type === 'tool_use' && block.input?.run_in_background === true && block.id) started.push(block.id);
+      }
+    }
+    if (row.type === 'user' && typeof content === 'string' && content.includes('<task-notification>')) {
+      for (const match of content.matchAll(/<tool-use-id>([^<]+)<\/tool-use-id>/g)) notified.add(match[1]);
+    }
+  }
+  const lastEnd = rows.findLastIndex((row) => row.type === 'system' && row.subtype === 'turn_duration');
+  const lastActivity = rows.findLastIndex((row) => row.type === 'user' || row.type === 'assistant');
+  return {
+    pendingBackground: started.filter((id) => !notified.has(id)),
+    turnOpen: lastActivity > lastEnd,
+  };
 }
 
 /** Everything the agent itself wrote in the session, oldest first, sub-agents left out. */
@@ -166,6 +204,12 @@ export async function readLastReply(
 ): Promise<string | null> {
   const session = await readSession(kind, sessionId, cwd);
   return kind === 'claude' ? lastClaudeReply(session, since) : lastOpenCodeReply(JSON.parse(session), since);
+}
+
+/** Null for agents that record no background work: their idle status is final. */
+export async function readTurnState(kind: AgentKind, sessionId: string, since: number): Promise<TurnState | null> {
+  if (kind !== 'claude') return null;
+  return claudeTurnState(await readSession(kind, sessionId, ''), since);
 }
 
 export async function readAssistantText(kind: AgentKind, sessionId: string, cwd: string): Promise<string> {

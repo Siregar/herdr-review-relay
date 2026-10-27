@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { claudeAssistantText, lastClaudeReply, lastOpenCodeReply, openCodeAssistantText } from '../src/replies.ts';
+import {
+  claudeAssistantText,
+  claudeTurnState,
+  lastClaudeReply,
+  lastOpenCodeReply,
+  openCodeAssistantText,
+} from '../src/replies.ts';
 
 const SENT = Date.parse('2026-10-27T10:00:00.000Z');
 const at = (seconds: number) => new Date(SENT + seconds * 1000).toISOString();
@@ -104,4 +110,43 @@ test('assistant text spans the whole session, without prompts or sub-agents', ()
     ],
   };
   assert.equal(openCodeAssistantText(exported), 'PR 231\n\ndone');
+});
+
+const turnEnd = (seconds: number) => ({ type: 'system', subtype: 'turn_duration', timestamp: at(seconds) });
+const background = (seconds: number, id: string) =>
+  assistant(seconds, [{ type: 'tool_use', id, name: 'Bash', input: { run_in_background: true } }]);
+const notice = (seconds: number, id: string) =>
+  user(seconds, `<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>${id}</tool-use-id>\n</task-notification>`);
+
+test('turn: idle while a background task runs is not finished', () => {
+  const transcript = jsonl(user(1, '/goal green ci'), background(2, 'toolu_ci'), assistant(3, [{ type: 'text', text: 'Waiting for CI.' }]), turnEnd(4));
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: ['toolu_ci'], turnOpen: false });
+});
+
+test('turn: a notice that has arrived but not been handled keeps the turn open', () => {
+  const transcript = jsonl(user(1, '/goal green ci'), background(2, 'toolu_ci'), turnEnd(4), notice(90, 'toolu_ci'));
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [], turnOpen: true });
+});
+
+test('turn: finished once the notice is handled and the turn has ended', () => {
+  const transcript = jsonl(
+    user(1, '/goal green ci'),
+    background(2, 'toolu_ci'),
+    turnEnd(4),
+    notice(90, 'toolu_ci'),
+    assistant(95, [{ type: 'text', text: 'CI is green.' }]),
+    turnEnd(96),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [], turnOpen: false });
+});
+
+test('turn: background tasks from before the prompt and from sub-agents do not count', () => {
+  const transcript = jsonl(
+    background(-600, 'toolu_dev_server'),
+    user(1, 'here is the feedback'),
+    { ...background(2, 'toolu_sub'), isSidechain: true },
+    assistant(3, [{ type: 'text', text: 'Fixed.' }]),
+    turnEnd(4),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [], turnOpen: false });
 });
