@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { loadConfig, type Config } from './config.ts';
 import { buildHandoff, fill, type Review } from './handoff.ts';
 import {
+  bestEffortNotify,
   getAgent,
   HerdrError,
   integrationStatus,
@@ -14,8 +15,8 @@ import {
 import { findPullRequest, type PullRequest } from './pr.ts';
 import { readLastReply, readTurnState } from './replies.ts';
 import { AGENT_NAMES, RelayError, resolveRoles, type Role } from './roles.ts';
-import { acquireLock, archive, loadReviews, needsClear, saveReviews, type ReviewRecords } from './state.ts';
-import { waitUntilReady } from './wait.ts';
+import { acquireLock, archive, loadReviews, needsClear, saveReviews, type ReviewRecord } from './state.ts';
+import { waitUntilReady, type WaitOptions } from './wait.ts';
 
 function log(message: string): void {
   console.log(`${new Date().toISOString()} ${message}`);
@@ -24,10 +25,10 @@ function log(message: string): void {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const cwdOf = (pane: Pane): string => pane.foreground_cwd ?? pane.cwd;
 
-/** Notifications are best effort: one that fails is logged and the run goes on. */
-async function tryNotify(...args: Parameters<typeof notify>): Promise<void> {
-  await notify(...args).catch((error: Error) => log(`notification failed: ${error.message}`));
-}
+const tryNotify = bestEffortNotify(log);
+
+/** How long to wait for an agent, and what its notifications are tagged with. */
+type WaitLimits = Omit<WaitOptions, 'title'>;
 
 /** Fails before anything is sent when herdr cannot tell us an agent's session. */
 async function checkIntegrations(roles: Role[]): Promise<void> {
@@ -40,7 +41,7 @@ async function checkIntegrations(roles: Role[]): Promise<void> {
 }
 
 /** Sends the text and waits until the agent has finished; see `waitUntilReady`. */
-async function promptUntilReady(role: Role, text: string, timeoutMinutes: number, config: Config, tag: string): Promise<void> {
+async function promptUntilReady(role: Role, text: string, limits: WaitLimits): Promise<void> {
   const id = role.pane.pane_id;
   await waitUntilReady(
     {
@@ -52,10 +53,10 @@ async function promptUntilReady(role: Role, text: string, timeoutMinutes: number
       },
       now: Date.now,
       sleep,
-      notify,
+      notify: tryNotify,
       log,
     },
-    { title: role.title, tag, timeoutMinutes, backgroundGraceMinutes: config.backgroundGraceMinutes },
+    { title: role.title, ...limits },
   );
 }
 
@@ -75,18 +76,17 @@ async function review(
   role: Role,
   pr: PullRequest,
   config: Config,
-  records: ReviewRecords,
-  reviewed: ReviewRecords,
-  tag: string,
-): Promise<Review> {
-  if (needsClear(records[role.pane.pane_id], role.pane.agent_session?.value)) {
+  previous: ReviewRecord | undefined,
+  limits: WaitLimits,
+): Promise<{ review: Review; record: ReviewRecord }> {
+  if (needsClear(previous, role.pane.agent_session?.value)) {
     log(`${role.title}: /clear, it already reviewed in this session`);
     await clearContext(role);
   }
   const reviewPrompt = fill(config.reviewPrompt[role.kind], { pr: pr.number });
   const sentAt = Date.now();
   log(`${role.title}: ${reviewPrompt}`);
-  await promptUntilReady(role, reviewPrompt, config.reviewTimeoutMinutes, config, tag);
+  await promptUntilReady(role, reviewPrompt, limits);
 
   const sessionId = (await getAgent(role.pane.pane_id)).agent_session?.value;
   if (!sessionId) throw new RelayError(`${role.title}: herdr reports no session for this ${AGENT_NAMES[role.kind]} pane`);
@@ -95,9 +95,11 @@ async function review(
     throw new RelayError(`${role.title} finished without a reply to the review prompt; its pane shows why (a failed model call, a usage limit)`);
   }
 
-  reviewed[role.pane.pane_id] = { sessionId, pr: pr.number, at: new Date().toISOString() };
   log(`${role.title}: reply has ${text.length} characters`);
-  return { title: role.title, agent: AGENT_NAMES[role.kind], text };
+  return {
+    review: { title: role.title, agent: AGENT_NAMES[role.kind], text },
+    record: { sessionId, pr: pr.number, at: new Date().toISOString() },
+  };
 }
 
 async function run(invokingPaneId: string, dryRun: boolean): Promise<void> {
@@ -143,11 +145,17 @@ async function run(invokingPaneId: string, dryRun: boolean): Promise<void> {
   const release = await acquireLock(roles.engineering.pane.tab_id);
   try {
     await tryNotify(`${tag}: review started`, roles.qa.map((role) => role.title).join(', '));
-    const reviewed: ReviewRecords = {};
-    const results = await Promise.allSettled(roles.qa.map((role) => review(role, pr, config, records, reviewed, tag)));
-    await saveReviews(reviewed);
+    const limits = (timeoutMinutes: number): WaitLimits => ({ tag, timeoutMinutes, backgroundGraceMinutes: config.backgroundGraceMinutes });
+    const results = await Promise.allSettled(
+      roles.qa.map((role) => review(role, pr, config, records[role.pane.pane_id], limits(config.reviewTimeoutMinutes))),
+    );
+    await saveReviews(
+      Object.fromEntries(
+        results.flatMap((result, index) => (result.status === 'fulfilled' ? [[roles.qa[index].pane.pane_id, result.value.record]] : [])),
+      ),
+    );
 
-    const reviews = results.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
+    const reviews = results.flatMap((result) => (result.status === 'fulfilled' ? [result.value.review] : []));
     const failures = results.flatMap((result, index) =>
       result.status === 'rejected' ? [`${roles.qa[index].title}: ${(result.reason as Error).message}`] : [],
     );
@@ -159,11 +167,12 @@ async function run(invokingPaneId: string, dryRun: boolean): Promise<void> {
       throw new RelayError(`${failures.join('; ')}. Nothing was sent to Engineering; the other reviews are in ${archived}`);
     }
 
+    const engineeringLimits = limits(config.engineeringTimeoutMinutes);
     log(`${roles.engineering.title}: handoff, ${handoff.length} characters`);
-    await promptUntilReady(roles.engineering, handoff, config.engineeringTimeoutMinutes, config, tag);
+    await promptUntilReady(roles.engineering, handoff, engineeringLimits);
     if (config.followUp) {
       log(`${roles.engineering.title}: ${config.followUp}`);
-      await promptUntilReady(roles.engineering, fill(config.followUp, { pr: pr.number }), config.engineeringTimeoutMinutes, config, tag);
+      await promptUntilReady(roles.engineering, fill(config.followUp, { pr: pr.number }), engineeringLimits);
     }
     await tryNotify(`${tag} is ready for you`, 'QA feedback is worked in and the follow-up has finished.', 'done');
     log('done');

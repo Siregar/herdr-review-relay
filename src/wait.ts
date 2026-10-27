@@ -1,4 +1,4 @@
-import type { AgentStatus } from './herdr.ts';
+import type { AgentStatus, Sound } from './herdr.ts';
 import type { TurnState } from './replies.ts';
 import { RelayError } from './roles.ts';
 
@@ -16,7 +16,8 @@ export interface WaitDeps {
   turn(since: number): Promise<TurnState | null>;
   now(): number;
   sleep(ms: number): Promise<void>;
-  notify(title: string, body: string, sound: 'request'): Promise<void>;
+  /** Best effort: a notification that fails must not end the wait. */
+  notify(title: string, body: string, sound: Sound): Promise<void>;
   log(message: string): void;
 }
 
@@ -55,9 +56,7 @@ export async function waitUntilReady(deps: WaitDeps, options: WaitOptions): Prom
       if (blockedSince === null) {
         blockedSince = now;
         deps.log(`${title} is blocked`);
-        await deps.notify(`${tag}: ${title} needs you`, 'It is waiting at a question or an approval.', 'request').catch(
-          (error: Error) => deps.log(`notification failed: ${error.message}`),
-        );
+        await deps.notify(`${tag}: ${title} needs you`, 'It is waiting at a question or an approval.', 'request');
       }
       openSince = null;
       shellsOnlySince = null;

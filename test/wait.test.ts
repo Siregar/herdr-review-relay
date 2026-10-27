@@ -12,7 +12,6 @@ interface Script {
   status: (minute: number) => AgentStatus;
   /** Turn state at a minute since the prompt was sent; null for an agent that records none. */
   turn?: (minute: number) => TurnState | null;
-  notify?: () => Promise<void>;
 }
 
 /** Runs the wait against a fake clock; every sleep moves it on. Returns how long the wait took. */
@@ -33,7 +32,6 @@ async function wait(script: Script, options = OPTIONS) {
     },
     notify: async (title) => {
       notices.push(title);
-      await script.notify?.();
     },
     log: (message) => logs.push(message),
   };
@@ -125,16 +123,6 @@ test('wait: a deadline that passes while the agent is blocked does not end the w
   const result = await wait({ status: (minute) => (minute < 100 ? 'blocked' : 'idle'), turn: () => closed() });
   assert.equal(result.outcome, 'ready');
   assert.ok(result.minutes >= 100, `ended after ${result.minutes} minutes`);
-});
-
-test('wait: a failing notification does not end the wait', async () => {
-  const result = await wait({
-    status: (minute) => (minute < 5 ? 'blocked' : 'idle'),
-    turn: () => closed(),
-    notify: () => Promise.reject(new Error('herdr is gone')),
-  });
-  assert.equal(result.outcome, 'ready');
-  assert.ok(result.logs.some((line) => line.includes('herdr is gone')));
 });
 
 test('wait: an agent that records no turns is ready when idle', async () => {
