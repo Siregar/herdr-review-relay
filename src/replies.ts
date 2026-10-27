@@ -27,9 +27,15 @@ interface ClaudeRow {
   isSidechain?: boolean;
   message?: { content?: string | ClaudeBlock[] };
   /** What the tool reported, on the row carrying its result. */
-  toolUseResult?: { backgroundTaskId?: string; isAsync?: boolean; agentId?: string };
+  toolUseResult?: {
+    backgroundTaskId?: string;
+    isAsync?: boolean;
+    agentId?: string;
+    resumedAgentId?: string;
+    revivedAgentId?: string;
+  };
   /** A queued prompt, such as a task notice, delivered to the agent in the middle of a turn. */
-  attachment?: { type?: string; prompt?: string };
+  attachment?: { type?: string; prompt?: string | ClaudeBlock[] };
 }
 
 function parseClaudeRows(jsonl: string): ClaudeRow[] {
@@ -79,9 +85,16 @@ export function lastClaudeReply(jsonl: string, since: number): string | null {
   return texts.join('\n\n').trim() || null;
 }
 
+export interface BackgroundTask {
+  /** The id notices and stop calls use: `backgroundTaskId` for a shell, `agentId` for a sub-agent. */
+  id: string;
+  /** A sub-agent always reports or is stopped; a shell may run for good, as a dev server does. */
+  kind: 'shell' | 'agent';
+}
+
 export interface TurnState {
-  /** Background tasks started since the prompt that have neither reported nor been stopped, by task id. */
-  pendingBackground: string[];
+  /** Background tasks started since the prompt that have neither reported nor been stopped. */
+  pendingBackground: BackgroundTask[];
   /** Rows were written after the last turn ended: a turn is running, or a notice waits to be handled. */
   turnOpen: boolean;
 }
@@ -89,10 +102,10 @@ export interface TurnState {
 /** Tools that stop a background task by its id, and the input key that carries the id. */
 const STOP_TOOLS: Record<string, 'task_id' | 'shell_id'> = { TaskStop: 'task_id', KillShell: 'shell_id', KillBash: 'shell_id' };
 
-interface BackgroundTask {
+interface TrackedTask extends BackgroundTask {
+  /** The tool call that last started the task; a notice naming an earlier one is about an earlier run. */
   toolUseId: string;
-  /** The id notices and stop calls use: `backgroundTaskId` for a shell, `agentId` for a sub-agent. */
-  taskId?: string;
+  running: boolean;
 }
 
 /**
@@ -101,48 +114,61 @@ interface BackgroundTask {
  * `<task-notification>` arrives, so idle alone ends a wait too early.
  *
  * A task starts with a `run_in_background` tool call, or with a tool result that reports one: a
- * sub-agent launched async, a command that timed out into the background. It ends with a delivered
- * notice naming its tool use id or its task id, or with a stop call naming its task id. A notice
+ * sub-agent launched async or resumed with SendMessage, a command that timed out into the
+ * background. It ends with a delivered notice for its latest start, or with a stop call naming its
+ * task id. Rows count in order, so a resumed sub-agent runs again after its first notice. A notice
  * that is only queued has not reached the agent, which will still wake up for it.
  */
 export function claudeTurnState(jsonl: string, since: number): TurnState {
   const rows = parseClaudeRows(jsonl).filter((row) => !row.isSidechain);
-  const tasks = new Map<string, BackgroundTask>();
-  const ended = new Set<string>();
+  const tasks: TrackedTask[] = [];
+  const byId = new Map<string, TrackedTask>(); // By tool use id and by task id.
+  const start = (toolUseId: string, taskId: string | undefined, kind: BackgroundTask['kind']): void => {
+    let task = (taskId === undefined ? undefined : byId.get(taskId)) ?? byId.get(toolUseId);
+    if (!task) tasks.push((task = { id: toolUseId, kind, toolUseId, running: true }));
+    Object.assign(task, { id: taskId ?? task.id, kind, toolUseId, running: true });
+    byId.set(toolUseId, task);
+    if (taskId !== undefined) byId.set(taskId, task);
+  };
   for (const row of rows) {
     const content = row.message?.content;
     const recent = Date.parse(row.timestamp ?? '') >= since - SKEW_MS;
     if (row.type === 'assistant' && Array.isArray(content)) {
       for (const block of content) {
         if (block.type !== 'tool_use') continue;
-        if (recent && block.input?.run_in_background === true && block.id) tasks.set(block.id, { toolUseId: block.id });
+        if (recent && block.input?.run_in_background === true && block.id) {
+          start(block.id, undefined, block.name === 'Agent' || block.name === 'Task' ? 'agent' : 'shell');
+        }
         const stopKey = STOP_TOOLS[block.name ?? ''];
-        const stopped = stopKey && block.input?.[stopKey];
-        if (stopped) ended.add(stopped);
+        const stopped = stopKey && byId.get(block.input?.[stopKey] ?? '');
+        if (stopped) stopped.running = false;
       }
     }
     const result = row.toolUseResult;
-    if (row.type === 'user' && recent && Array.isArray(content) && (result?.backgroundTaskId || result?.isAsync === true)) {
-      const toolUseId = content.find((block) => block.type === 'tool_result')?.tool_use_id;
-      if (toolUseId) tasks.set(toolUseId, { toolUseId, taskId: result.backgroundTaskId ?? result.agentId });
+    const toolUseId = Array.isArray(content) ? content.find((block) => block.type === 'tool_result')?.tool_use_id : undefined;
+    if (row.type === 'user' && recent && toolUseId && result) {
+      const agentId = result.resumedAgentId ?? result.revivedAgentId ?? (result.isAsync === true ? result.agentId : undefined);
+      if (result.backgroundTaskId) start(toolUseId, result.backgroundTaskId, 'shell');
+      else if (agentId) start(toolUseId, agentId, 'agent');
     }
     // A notice reaches an idle agent as a prompt, a busy one as a queued command.
     const notice =
       row.type === 'user' && typeof content === 'string'
         ? content
-        : row.type === 'attachment' && row.attachment?.type === 'queued_command'
-          ? (row.attachment.prompt ?? '')
+        : row.type === 'attachment' && row.attachment?.type === 'queued_command' && typeof row.attachment.prompt === 'string'
+          ? row.attachment.prompt
           : '';
-    if (notice.includes('<task-notification>')) {
-      for (const match of notice.matchAll(/<(?:tool-use|task)-id>([^<]+)<\/(?:tool-use|task)-id>/g)) ended.add(match[1]);
+    for (const [, body] of notice.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
+      const noticeTaskId = /<task-id>([^<]+)<\/task-id>/.exec(body)?.[1];
+      const noticeToolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(body)?.[1];
+      const task = byId.get(noticeTaskId ?? '') ?? byId.get(noticeToolUseId ?? '');
+      if (task && (noticeToolUseId === undefined || noticeToolUseId === task.toolUseId)) task.running = false;
     }
   }
   const lastEnd = rows.findLastIndex((row) => row.type === 'system' && row.subtype === 'turn_duration');
   const lastActivity = rows.findLastIndex((row) => row.type === 'user' || row.type === 'assistant');
   return {
-    pendingBackground: [...tasks.values()]
-      .filter((task) => !ended.has(task.toolUseId) && !(task.taskId && ended.has(task.taskId)))
-      .map((task) => task.taskId ?? task.toolUseId),
+    pendingBackground: tasks.filter((task) => task.running).map(({ id, kind }) => ({ id, kind })),
     turnOpen: lastActivity > lastEnd,
   };
 }

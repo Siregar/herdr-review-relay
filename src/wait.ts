@@ -25,15 +25,17 @@ export interface WaitOptions {
   /** Prefix of the notification title, such as `PR #230`. */
   tag: string;
   timeoutMinutes: number;
-  /** How long background tasks may run on once nothing else is left; then they are abandoned. */
+  /** How long background shells may run on once nothing else is left; then they are abandoned. */
   backgroundGraceMinutes: number;
 }
 
 /**
  * Sends the prompt and waits until the agent has finished. Idle is not enough on its own: Claude Code
  * goes idle while a background task runs and wakes up when it reports, so its transcript must show
- * no pending background task and a closed turn too. A task that never reports (a dev server, a
- * stopped shell) is abandoned once it alone has held the wait for `backgroundGraceMinutes`.
+ * no pending background task and a closed turn too. A shell that never reports (a dev server, a
+ * watch loop) is abandoned once shells alone have held the wait for `backgroundGraceMinutes`. A
+ * sub-agent is waited for until the deadline: it always reports or is stopped, and abandoning it
+ * would take its "I launched the reviewers" for the review.
  *
  * While the agent waits at a question or an approval, the user gets a notification, and the
  * deadline stands still until they have answered.
@@ -44,8 +46,8 @@ export async function waitUntilReady(deps: WaitDeps, options: WaitOptions): Prom
   let end = sentAt + options.timeoutMinutes * MINUTE;
   let status = await deps.send(end - sentAt);
   let blockedSince: number | null = null;
-  let idleSince: number | null = null;
-  let backgroundOnlySince: number | null = null;
+  let openSince: number | null = null;
+  let shellsOnlySince: number | null = null;
   let waitingOn = '';
   for (;;) {
     const now = deps.now();
@@ -57,38 +59,41 @@ export async function waitUntilReady(deps: WaitDeps, options: WaitOptions): Prom
           (error: Error) => deps.log(`notification failed: ${error.message}`),
         );
       }
-      idleSince = null;
-      backgroundOnlySince = null;
+      openSince = null;
+      shellsOnlySince = null;
     } else {
       if (blockedSince !== null) {
         end += now - blockedSince; // The user kept the agent waiting, not the agent the relay.
         blockedSince = null;
       }
       if (status === 'idle' || status === 'done') {
-        idleSince ??= now;
         const turn = await deps.turn(sentAt);
         if (!turn) return;
         // A turn without an end marker would otherwise hold the relay until its deadline.
-        const turnClosed = !turn.turnOpen || now - idleSince >= OPEN_TURN_GRACE_MS;
+        openSince = turn.turnOpen ? (openSince ?? now) : null;
+        const turnClosed = openSince === null || now - openSince >= OPEN_TURN_GRACE_MS;
         const pending = turn.pendingBackground;
+        const agents = pending.filter((task) => task.kind === 'agent').length;
         if (turnClosed && pending.length === 0) return;
-        if (turnClosed) {
-          backgroundOnlySince ??= now;
-          if (now - backgroundOnlySince >= options.backgroundGraceMinutes * MINUTE) {
-            deps.log(
-              `${title}: abandoned background task(s) ${pending.join(', ')} after ${options.backgroundGraceMinutes} minutes`,
-            );
+        if (turnClosed && agents === 0) {
+          shellsOnlySince ??= now;
+          if (now - shellsOnlySince >= options.backgroundGraceMinutes * MINUTE) {
+            const ids = pending.map((task) => task.id).join(', ');
+            deps.log(`${title}: abandoned background shell(s) ${ids} after ${options.backgroundGraceMinutes} minutes`);
             return;
           }
         } else {
-          backgroundOnlySince = null;
+          shellsOnlySince = null;
         }
-        const busy = pending.length > 0 ? `${pending.length} background task(s) running` : 'an unfinished turn';
+        const busy =
+          pending.length > 0
+            ? `${agents} sub-agent(s) and ${pending.length - agents} background shell(s) running`
+            : 'an unfinished turn';
         if (busy !== waitingOn) deps.log(`${title} is idle with ${busy}; waiting`);
         waitingOn = busy;
       } else {
-        idleSince = null;
-        backgroundOnlySince = null;
+        openSince = null;
+        shellsOnlySince = null;
       }
     }
     if (blockedSince === null && deps.now() >= end) throw new RelayError(`Timed out after ${options.timeoutMinutes} minutes`);

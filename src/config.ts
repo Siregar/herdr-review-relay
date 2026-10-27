@@ -15,7 +15,7 @@ export interface Config {
   followUp: string | null;
   reviewTimeoutMinutes: number;
   engineeringTimeoutMinutes: number;
-  /** How long an idle agent's background tasks may run on alone before the relay stops waiting for them. */
+  /** How long an idle agent's background shells may run on alone before the relay stops waiting for them. */
   backgroundGraceMinutes: number;
 }
 
