@@ -6,6 +6,7 @@
 [![herdr ≥ 0.9.0](https://img.shields.io/badge/herdr-%E2%89%A5%200.9.0-blue)](https://herdr.dev/docs/marketplace/)
 [![Node ≥ 22.18](https://img.shields.io/badge/node-%E2%89%A5%2022.18-blue)](https://nodejs.org)
 [![Platforms: macOS | Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)](herdr-plugin.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ![Herdr Review Relay: two QA panes on the right send their reviews back to the Engineering pane on the left](cover.jpg)
 
@@ -91,3 +92,7 @@ node src/relay.ts copy --pane <pane id> --stdout   # last reply to stdout
 ```
 
 `herdr plugin log list --plugin review-relay` shows each run's output.
+
+## License
+
+[MIT](LICENSE)
