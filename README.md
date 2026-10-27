@@ -1,4 +1,13 @@
-# herdr review relay
+# Herdr Review Relay
+
+[![CI](https://img.shields.io/github/actions/workflow/status/Siregar/herdr-review-relay/ci.yml?branch=main&label=CI)](https://github.com/Siregar/herdr-review-relay/actions/workflows/ci.yml)
+[![Test](https://img.shields.io/github/actions/workflow/status/Siregar/herdr-review-relay/test.yml?branch=main&label=test)](https://github.com/Siregar/herdr-review-relay/actions/workflows/test.yml)
+[![Supports: Claude Code | OpenCode](https://img.shields.io/badge/supports-Claude%20Code%20%7C%20OpenCode-blue)](#setup)
+[![herdr ≥ 0.9.0](https://img.shields.io/badge/herdr-%E2%89%A5%200.9.0-blue)](https://herdr.dev/docs/marketplace/)
+[![Node ≥ 22.18](https://img.shields.io/badge/node-%E2%89%A5%2022.18-blue)](https://nodejs.org)
+[![Platforms: macOS | Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)](herdr-plugin.toml)
+
+![Herdr Review Relay: two QA panes on the right send their reviews back to the Engineering pane on the left](cover.jpg)
 
 A [herdr](https://herdr.dev) plugin for one Engineering agent and any number of QA agents in one tab. One key sends Engineering's PR to every QA agent, waits for all their reviews, and hands them to Engineering in one prompt. A follow-up such as `/goal` comes after that.
 
@@ -26,8 +35,10 @@ Requires Node 22.18 or later, `gh`, and herdr 0.9.0 or later. Claude Code and Op
 ```sh
 herdr integration install claude     # herdr learns each pane's session id
 herdr integration install opencode   # restart running OpenCode panes afterwards
-herdr plugin link /path/to/herdr-review-relay
+herdr plugin install Siregar/herdr-review-relay
 ```
+
+The plugin has no build step and no runtime dependencies; Node runs the TypeScript sources directly. To work on a local checkout instead, use `herdr plugin link /path/to/herdr-review-relay`.
 
 Label the panes: right-click a pane > Rename, or `herdr pane rename <pane> "QA #1"`.
 
