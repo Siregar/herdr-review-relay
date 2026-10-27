@@ -14,9 +14,14 @@ test('the PR is the last pull request link in the text, issue links do not count
   assert.equal(sessionPullRequest('Draft-PR #231 is open', 'kigumi-ui/kigumi-cli'), null);
 });
 
-test('a session PR from another repository is refused, not looked up in this one', () => {
+test('the session PR is the last one in this repository; links to other repositories are passed over', () => {
   const reply = 'Opened https://github.com/kigumi-ui/kigumi-cli/pull/231, it needs https://github.com/shoelace-style/webawesome/pull/12.';
-  assert.throws(() => sessionPullRequest(reply, 'kigumi-ui/kigumi-cli'), /shoelace-style\/webawesome.*kigumi-ui\/kigumi-cli/);
+  assert.equal(sessionPullRequest(reply, 'kigumi-ui/kigumi-cli'), 'https://github.com/kigumi-ui/kigumi-cli/pull/231');
+  assert.throws(
+    () => sessionPullRequest('It needs https://github.com/shoelace-style/webawesome/pull/12.', 'kigumi-ui/kigumi-cli'),
+    /shoelace-style\/webawesome.*kigumi-ui\/kigumi-cli/,
+    'links only to other repositories are refused, not looked up in this one',
+  );
   assert.equal(
     sessionPullRequest('See https://github.com/Kigumi-UI/Kigumi-CLI/pull/7', 'kigumi-ui/kigumi-cli'),
     'https://github.com/Kigumi-UI/Kigumi-CLI/pull/7',

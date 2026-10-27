@@ -12,18 +12,21 @@ export interface PullRequest {
 }
 
 /**
- * The last GitHub pull request URL in the text. A PR in another repository than `repo` (an upstream
- * fix, a dependency) is refused: QA would review the wrong change.
+ * The last GitHub pull request URL in the text that belongs to `repo`. Links to other repositories
+ * (an upstream fix, a dependency) are passed over; when the text links only those, it is refused, so
+ * QA never reviews the wrong change.
  */
 export function sessionPullRequest(text: string, repo: string): string | null {
-  const match = [...text.matchAll(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+/g)].at(-1);
-  if (!match) return null;
-  if (match[1].toLowerCase() !== repo.toLowerCase()) {
+  const links = [...text.matchAll(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+/g)];
+  const own = links.findLast((link) => link[1].toLowerCase() === repo.toLowerCase());
+  if (own) return own[0];
+  const foreign = links.at(-1);
+  if (foreign) {
     throw new RelayError(
-      `Engineering's session last links ${match[0]}, a PR in ${match[1]}, not in this checkout's ${repo}. Push the branch so gh finds its PR`,
+      `Engineering's session last links ${foreign[0]}, a PR in ${foreign[1]}, not in this checkout's ${repo}. Push the branch so gh finds its PR`,
     );
   }
-  return match[0];
+  return null;
 }
 
 /** gh's message when the branch has no PR, or there is no branch to look one up for. */
