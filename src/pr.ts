@@ -62,7 +62,8 @@ export async function findPullRequest(engineering: Role, cwd: string): Promise<P
   if (!pr) {
     const sessionId = engineering.pane.agent_session?.value;
     const written = sessionId ? await readAssistantText(engineering.kind, sessionId, cwd) : '';
-    const repo = (await gh(cwd, ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']))?.trim() ?? '';
+    const repo = (await gh(cwd, ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']))?.trim();
+    if (!repo) throw new RelayError(`gh cannot tell which repository ${cwd} belongs to`);
     const url = sessionPullRequest(written, repo);
     if (url === null) {
       throw new RelayError(`No PR found: gh knows none for the branch in ${cwd}, and Engineering's session links none`);
