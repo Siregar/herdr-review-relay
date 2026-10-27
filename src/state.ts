@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { RelayError } from './roles.ts';
@@ -31,9 +31,16 @@ export async function loadReviews(): Promise<ReviewRecords> {
   }
 }
 
-export async function saveReviews(records: ReviewRecords): Promise<void> {
+/**
+ * Records this run's panes. Relays in other tabs save too, so the file is read again and only
+ * `updates` are merged in; the write goes through a temporary file so no reader sees half of it.
+ */
+export async function saveReviews(updates: ReviewRecords): Promise<void> {
   await mkdir(STATE_DIR, { recursive: true });
-  await writeFile(REVIEWS_FILE, `${JSON.stringify(records, null, 2)}\n`);
+  const records = { ...(await loadReviews()), ...updates };
+  const temporary = `${REVIEWS_FILE}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(records, null, 2)}\n`);
+  await rename(temporary, REVIEWS_FILE);
 }
 
 function isRunning(pid: number): boolean {
@@ -51,14 +58,24 @@ export async function acquireLock(tabId: string): Promise<() => Promise<void>> {
   await mkdir(dir, { recursive: true });
   const path = join(dir, `${tabId.replace(/[^\w-]/g, '_')}.pid`);
   try {
-    const pid = Number(await readFile(path, 'utf8'));
-    if (isRunning(pid)) throw new RelayError(`A review relay is already running in this tab (pid ${pid})`);
+    const pid = Number((await readFile(path, 'utf8')).trim());
+    // An empty file is a relay that died between creating the lock and writing its pid; pid 0 would
+    // pass the liveness check, as the caller's own process group.
+    if (Number.isInteger(pid) && pid > 0 && isRunning(pid)) {
+      throw new RelayError(`A review relay is already running in this tab (pid ${pid})`);
+    }
     await rm(path, { force: true });
   } catch (error) {
     if (error instanceof RelayError) throw error;
     // No lock file: nothing to clear.
   }
-  const handle = await open(path, 'wx');
+  let handle;
+  try {
+    handle = await open(path, 'wx');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    throw new RelayError('A review relay started in this tab at the same moment');
+  }
   await handle.writeFile(String(process.pid));
   await handle.close();
   return () => rm(path, { force: true });
