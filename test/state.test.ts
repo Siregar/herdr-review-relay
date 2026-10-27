@@ -24,6 +24,12 @@ test('reviews: two relays saving at once both keep their panes', async () => {
   assert.deepEqual((await readdir(dir)).filter((name) => name.startsWith('reviews')), ['reviews.json'], 'no temporary file is left behind');
 });
 
+test('reviews: a pane that reviewed again keeps its new session, not the one on file', async () => {
+  await saveReviews({ p3: record('old') });
+  await saveReviews({ p3: record('new') });
+  assert.equal((await loadReviews()).p3.sessionId, 'new');
+});
+
 test('lock: an empty lock file, left by a relay that died while taking it, is stale', async () => {
   await mkdir(join(dir, 'locks'), { recursive: true });
   await writeFile(join(dir, 'locks', 'tab_empty.pid'), '');
