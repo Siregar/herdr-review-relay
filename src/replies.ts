@@ -14,7 +14,9 @@ interface ClaudeBlock {
   type: string;
   text?: string;
   id?: string;
-  input?: { run_in_background?: boolean };
+  name?: string;
+  tool_use_id?: string;
+  input?: { run_in_background?: boolean; task_id?: string; shell_id?: string };
 }
 
 interface ClaudeRow {
@@ -24,6 +26,10 @@ interface ClaudeRow {
   isMeta?: boolean;
   isSidechain?: boolean;
   message?: { content?: string | ClaudeBlock[] };
+  /** What the tool reported, on the row carrying its result. */
+  toolUseResult?: { backgroundTaskId?: string; isAsync?: boolean; agentId?: string };
+  /** A queued prompt, such as a task notice, delivered to the agent in the middle of a turn. */
+  attachment?: { type?: string; prompt?: string };
 }
 
 function parseClaudeRows(jsonl: string): ClaudeRow[] {
@@ -74,36 +80,69 @@ export function lastClaudeReply(jsonl: string, since: number): string | null {
 }
 
 export interface TurnState {
-  /** Background tasks started since the prompt whose completion notice has not arrived yet. */
+  /** Background tasks started since the prompt that have neither reported nor been stopped, by task id. */
   pendingBackground: string[];
   /** Rows were written after the last turn ended: a turn is running, or a notice waits to be handled. */
   turnOpen: boolean;
+}
+
+/** Tools that stop a background task by its id, and the input key that carries the id. */
+const STOP_TOOLS: Record<string, 'task_id' | 'shell_id'> = { TaskStop: 'task_id', KillShell: 'shell_id', KillBash: 'shell_id' };
+
+interface BackgroundTask {
+  toolUseId: string;
+  /** The id notices and stop calls use: `backgroundTaskId` for a shell, `agentId` for a sub-agent. */
+  taskId?: string;
 }
 
 /**
  * Whether a Claude Code agent that looks idle has really finished. It goes idle while a background
  * task runs (a CI wait, a background sub-agent) and wakes up when the task's
  * `<task-notification>` arrives, so idle alone ends a wait too early.
+ *
+ * A task starts with a `run_in_background` tool call, or with a tool result that reports one: a
+ * sub-agent launched async, a command that timed out into the background. It ends with a delivered
+ * notice naming its tool use id or its task id, or with a stop call naming its task id. A notice
+ * that is only queued has not reached the agent, which will still wake up for it.
  */
 export function claudeTurnState(jsonl: string, since: number): TurnState {
   const rows = parseClaudeRows(jsonl).filter((row) => !row.isSidechain);
-  const started: string[] = [];
-  const notified = new Set<string>();
+  const tasks = new Map<string, BackgroundTask>();
+  const ended = new Set<string>();
   for (const row of rows) {
     const content = row.message?.content;
-    if (row.type === 'assistant' && Array.isArray(content) && Date.parse(row.timestamp ?? '') >= since - SKEW_MS) {
+    const recent = Date.parse(row.timestamp ?? '') >= since - SKEW_MS;
+    if (row.type === 'assistant' && Array.isArray(content)) {
       for (const block of content) {
-        if (block.type === 'tool_use' && block.input?.run_in_background === true && block.id) started.push(block.id);
+        if (block.type !== 'tool_use') continue;
+        if (recent && block.input?.run_in_background === true && block.id) tasks.set(block.id, { toolUseId: block.id });
+        const stopKey = STOP_TOOLS[block.name ?? ''];
+        const stopped = stopKey && block.input?.[stopKey];
+        if (stopped) ended.add(stopped);
       }
     }
-    if (row.type === 'user' && typeof content === 'string' && content.includes('<task-notification>')) {
-      for (const match of content.matchAll(/<tool-use-id>([^<]+)<\/tool-use-id>/g)) notified.add(match[1]);
+    const result = row.toolUseResult;
+    if (row.type === 'user' && recent && Array.isArray(content) && (result?.backgroundTaskId || result?.isAsync === true)) {
+      const toolUseId = content.find((block) => block.type === 'tool_result')?.tool_use_id;
+      if (toolUseId) tasks.set(toolUseId, { toolUseId, taskId: result.backgroundTaskId ?? result.agentId });
+    }
+    // A notice reaches an idle agent as a prompt, a busy one as a queued command.
+    const notice =
+      row.type === 'user' && typeof content === 'string'
+        ? content
+        : row.type === 'attachment' && row.attachment?.type === 'queued_command'
+          ? (row.attachment.prompt ?? '')
+          : '';
+    if (notice.includes('<task-notification>')) {
+      for (const match of notice.matchAll(/<(?:tool-use|task)-id>([^<]+)<\/(?:tool-use|task)-id>/g)) ended.add(match[1]);
     }
   }
   const lastEnd = rows.findLastIndex((row) => row.type === 'system' && row.subtype === 'turn_duration');
   const lastActivity = rows.findLastIndex((row) => row.type === 'user' || row.type === 'assistant');
   return {
-    pendingBackground: started.filter((id) => !notified.has(id)),
+    pendingBackground: [...tasks.values()]
+      .filter((task) => !ended.has(task.toolUseId) && !(task.taskId && ended.has(task.taskId)))
+      .map((task) => task.taskId ?? task.toolUseId),
     turnOpen: lastActivity > lastEnd,
   };
 }
