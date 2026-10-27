@@ -66,14 +66,6 @@ export async function promptAndWait(target: string, text: string, timeoutMs: num
   return (result.agent as Pane).agent_status ?? 'unknown';
 }
 
-/** Returns as soon as the agent is in one of the statuses, immediately when it already is. */
-export async function waitFor(target: string, statuses: AgentStatus[], timeoutMs: number): Promise<AgentStatus> {
-  const args = ['agent', 'wait', target, '--timeout', String(timeoutMs)];
-  for (const status of statuses) args.push('--until', status);
-  const result = await herdr(args);
-  return (result.agent as Pane).agent_status ?? 'unknown';
-}
-
 export async function notify(title: string, body: string, sound: 'none' | 'done' | 'request' = 'none'): Promise<void> {
   await herdr(['notification', 'show', title, '--body', body, '--sound', sound]);
 }
