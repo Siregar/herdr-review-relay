@@ -66,14 +66,14 @@ export function parseConfig(raw: unknown): Config {
       config.reviewPrompt[kind] = prompts[kind] as string;
     }
   }
-  let groups = 0;
   try {
-    // An alternative that matches the empty string reports every capture group, matched or not.
-    groups = new RegExp(`${config.qaLabelPattern}|`).exec('')!.length - 1;
+    new RegExp(config.qaLabelPattern);
   } catch (_error) {
     expect(false, 'qaLabelPattern', 'a valid regular expression');
   }
-  expect(groups > 0, 'qaLabelPattern', 'a regular expression with a capture group for the QA number');
+  // An alternative that matches the empty string reports every capture group, matched or not.
+  const groups = new RegExp(`${config.qaLabelPattern}|`).exec('')?.length ?? 1;
+  expect(groups > 1, 'qaLabelPattern', 'a regular expression with a capture group for the QA number');
   return config;
 }
 

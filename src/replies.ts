@@ -117,7 +117,8 @@ interface TrackedTask extends BackgroundTask {
  * sub-agent launched async or resumed with SendMessage, a command that timed out into the
  * background. It ends with a delivered notice for its latest start, or with a stop call naming its
  * task id. Rows count in order, so a resumed sub-agent runs again after its first notice. A notice
- * that is only queued has not reached the agent, which will still wake up for it.
+ * is delivered as a prompt or a `queued_command` attachment; one that a `queue-operation` row has only
+ * queued has not reached the agent, which will still wake up for it.
  */
 export function claudeTurnState(jsonl: string, since: number): TurnState {
   const rows = parseClaudeRows(jsonl).filter((row) => !row.isSidechain);
