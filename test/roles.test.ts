@@ -1,0 +1,56 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import type { Pane } from '../src/herdr.ts';
+import { resolveRoles } from '../src/roles.ts';
+
+const LABELS = { engineering: 'Engineering', qaPattern: '^QA #(\\d+)$' };
+
+function pane(id: string, label: string | null, agent: string | null = 'claude', tab = 't1'): Pane {
+  return { pane_id: id, tab_id: tab, label, agent, cwd: '/repo' };
+}
+
+test('the invoking pane is Engineering when no pane carries the label', () => {
+  const roles = resolveRoles([pane('p1', null), pane('p2', 'QA #1', 'opencode')], 'p1', LABELS);
+  assert.equal(roles.engineering.pane.pane_id, 'p1');
+  assert.deepEqual(
+    roles.qa.map((role) => [role.title, role.kind]),
+    [['QA #1', 'opencode']],
+  );
+});
+
+test('a pane labelled Engineering wins, wherever the key was pressed', () => {
+  const panes = [pane('p1', 'Engineering'), pane('p2', null), pane('p3', 'QA #1')];
+  assert.equal(resolveRoles(panes, 'p2', LABELS).engineering.pane.pane_id, 'p1');
+});
+
+test('QA panes are ordered by their number, not their position', () => {
+  const panes = [pane('p1', null), pane('p2', 'QA #10'), pane('p3', 'QA #2'), pane('p4', 'QA #1')];
+  assert.deepEqual(
+    resolveRoles(panes, 'p1', LABELS).qa.map((role) => role.title),
+    ['QA #1', 'QA #2', 'QA #10'],
+  );
+});
+
+test('panes in other tabs are never roles', () => {
+  const panes = [pane('p1', null), pane('p2', 'QA #1'), pane('x1', 'QA #2', 'claude', 't2'), pane('x2', 'Engineering', 'claude', 't2')];
+  const roles = resolveRoles(panes, 'p1', LABELS);
+  assert.equal(roles.engineering.pane.pane_id, 'p1');
+  assert.deepEqual(roles.qa.map((role) => role.pane.pane_id), ['p2']);
+});
+
+test('pressing the key in a QA pane without an Engineering label is refused', () => {
+  assert.throws(() => resolveRoles([pane('p1', null), pane('p2', 'QA #1')], 'p2', LABELS), /Engineering pane/);
+});
+
+test('a tab without QA panes is refused', () => {
+  assert.throws(() => resolveRoles([pane('p1', null), pane('p2', 'notes')], 'p1', LABELS), /No QA panes/);
+});
+
+test('two panes with the same QA number are refused', () => {
+  assert.throws(() => resolveRoles([pane('p1', null), pane('p2', 'QA #1'), pane('p3', 'QA #1')], 'p1', LABELS), /Two panes/);
+});
+
+test('a QA pane without a supported agent is refused', () => {
+  assert.throws(() => resolveRoles([pane('p1', null), pane('p2', 'QA #1', 'codex')], 'p1', LABELS), /only Claude Code and OpenCode/);
+  assert.throws(() => resolveRoles([pane('p1', null), pane('p2', 'QA #1', null)], 'p1', LABELS), /no agent running/);
+});

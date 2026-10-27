@@ -1,0 +1,82 @@
+# herdr review relay
+
+A [herdr](https://herdr.dev) plugin for one Engineering agent and any number of QA agents in one tab. One key sends Engineering's PR to every QA agent, waits for all their reviews, and hands them to Engineering in one prompt. A follow-up such as `/goal` comes after that.
+
+Reviews are read from each agent's own records (the Claude Code transcript, `opencode session export`), never from the screen. Nothing is cut short or wrapped, however long a path is.
+
+The relay only types into sessions that are already running. Model, effort and agent stay whatever you set in each pane.
+
+## Flow
+
+1. Press `prefix+a` in the tab.
+2. The PR is the one `gh pr view` finds for Engineering's checkout. If gh finds none, it is the last PR link Engineering wrote in its session.
+3. Each QA pane gets its review command (`reviewPrompt`). A QA pane that already reviewed in its current session gets `/clear` first.
+4. The relay waits until every QA agent is done. When one stops at a question or an approval, you get a notification, and the wait goes on once you have answered.
+5. Engineering gets `handoffIntro`, followed by each review in a `<review from="QA #1" agent="Claude Code">` block.
+6. Once Engineering is done, it gets `followUp`. When that has finished too, you get a "ready for you" notification.
+
+Every handoff is also kept under `$HERDR_PLUGIN_STATE_DIR/runs/`. If one QA review fails, nothing is sent to Engineering, and the reviews that did finish are in that file.
+
+`prefix+y` copies the focused agent's last reply to the clipboard, from the same records.
+
+## Setup
+
+Requires Node 22.18 or later, `gh`, and herdr 0.9.0 or later. Claude Code and OpenCode are supported.
+
+```sh
+herdr integration install claude     # herdr learns each pane's session id
+herdr integration install opencode   # restart running OpenCode panes afterwards
+herdr plugin link /path/to/herdr-review-relay
+```
+
+Label the panes: right-click a pane > Rename, or `herdr pane rename <pane> "QA #1"`.
+
+- `Engineering`: optional. Without it, the pane you press the key in is Engineering.
+- `QA #1`, `QA #2`, ...: one per QA agent.
+
+Bind the actions in `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+a"
+type = "plugin_action"
+command = "review-relay.run"
+
+[[keys.command]]
+key = "prefix+y"
+type = "plugin_action"
+command = "review-relay.copy"
+```
+
+## Configuration
+
+`config.json` in `herdr plugin config-dir review-relay`. Every key is optional; these are the defaults:
+
+```json
+{
+  "engineeringLabel": "Engineering",
+  "qaLabelPattern": "^QA #(\\d+)$",
+  "reviewPrompt": {
+    "claude": "/mattpocock-skills:code-review {pr}",
+    "opencode": "/code-review {pr}"
+  },
+  "handoffIntro": "Here is the feedback from {count} independent QA agents on PR #{pr}. Check the feedback and fix issues.",
+  "followUp": "/goal green ci, no merge conflicts and mergeable",
+  "reviewTimeoutMinutes": 90,
+  "engineeringTimeoutMinutes": 240
+}
+```
+
+Set `followUp` to `null` to skip it.
+
+## Development
+
+```sh
+pnpm install
+pnpm test        # node --test
+pnpm typecheck
+node src/relay.ts run --dry-run --pane <pane id>   # roles, PR and prompts, sends nothing
+node src/relay.ts copy --pane <pane id> --stdout   # last reply to stdout
+```
+
+`herdr plugin log list --plugin review-relay` shows each run's output.

@@ -1,0 +1,20 @@
+id = "review-relay"
+name = "Review Relay"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Send a PR to the QA agents in this tab, bundle their reviews and hand them to the Engineering agent."
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "run"
+title = "Review relay: review this PR"
+description = "QA panes review the Engineering pane's PR; their replies go back to Engineering in one prompt."
+contexts = ["pane"]
+command = ["node", "src/relay.ts", "run"]
+
+[[actions]]
+id = "copy"
+title = "Review relay: copy last reply"
+description = "Copy the focused agent's last reply to the clipboard, read from its transcript."
+contexts = ["pane"]
+command = ["node", "src/relay.ts", "copy"]
