@@ -43,3 +43,23 @@ test('lock: a live relay holds the tab', async () => {
   await assert.rejects(acquireLock('tab_live'), /already running in this tab \(pid \d+\)/);
   await release();
 });
+
+test('lock: a pid that is not a positive integer is stale', async () => {
+  for (const content of ['-1', '12.5', 'not a pid']) {
+    await writeFile(join(dir, 'locks', 'tab_junk.pid'), content);
+    const release = await acquireLock('tab_junk');
+    await release();
+  }
+});
+
+test('lock: of relays starting at the same moment, one wins and the others are told why', async () => {
+  for (let round = 0; round < 5; round++) {
+    const results = await Promise.allSettled(Array.from({ length: 20 }, () => acquireLock(`tab_race_${round}`)));
+    const winners = results.filter((result) => result.status === 'fulfilled');
+    assert.equal(winners.length, 1);
+    for (const result of results) {
+      if (result.status === 'rejected') assert.match(result.reason.message, /review relay (is already running|started) in this tab/);
+    }
+    await (winners[0] as PromiseFulfilledResult<() => Promise<void>>).value();
+  }
+});

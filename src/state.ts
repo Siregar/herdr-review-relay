@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, writeFile, type FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { RelayError } from './roles.ts';
@@ -69,7 +69,7 @@ export async function acquireLock(tabId: string): Promise<() => Promise<void>> {
     if (error instanceof RelayError) throw error;
     // No lock file: nothing to clear.
   }
-  let handle;
+  let handle: FileHandle;
   try {
     handle = await open(path, 'wx');
   } catch (error) {
