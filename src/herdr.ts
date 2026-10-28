@@ -19,6 +19,9 @@ export interface Pane {
   foreground_cwd?: string | null;
 }
 
+/** The directory the pane's foreground process works in. */
+export const cwdOf = (pane: Pane): string => pane.foreground_cwd ?? pane.cwd;
+
 export class HerdrError extends Error {
   readonly code: string;
 

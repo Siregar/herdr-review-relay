@@ -99,6 +99,14 @@ export interface TurnState {
   turnOpen: boolean;
 }
 
+/** A notice reaches an idle agent as a prompt, a busy one as a queued command. */
+function noticeText(row: ClaudeRow): string {
+  const content = row.message?.content;
+  if (row.type === 'user' && typeof content === 'string') return content;
+  const prompt = row.type === 'attachment' && row.attachment?.type === 'queued_command' ? row.attachment.prompt : undefined;
+  return typeof prompt === 'string' ? prompt : ''; // A queued prompt with an image is a list of blocks, never a notice.
+}
+
 /** Tools that stop a background task by its id, and the input key that carries the id. */
 const STOP_TOOLS: Record<string, 'task_id' | 'shell_id'> = { TaskStop: 'task_id', KillShell: 'shell_id', KillBash: 'shell_id' };
 
@@ -152,14 +160,7 @@ export function claudeTurnState(jsonl: string, since: number): TurnState {
       if (result.backgroundTaskId) start(toolUseId, result.backgroundTaskId, 'shell');
       else if (agentId) start(toolUseId, agentId, 'agent');
     }
-    // A notice reaches an idle agent as a prompt, a busy one as a queued command.
-    const notice =
-      row.type === 'user' && typeof content === 'string'
-        ? content
-        : row.type === 'attachment' && row.attachment?.type === 'queued_command' && typeof row.attachment.prompt === 'string'
-          ? row.attachment.prompt
-          : '';
-    for (const [, body] of notice.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
+    for (const [, body] of noticeText(row).matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
       const noticeTaskId = /<task-id>([^<]+)<\/task-id>/.exec(body)?.[1];
       const noticeToolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(body)?.[1];
       const task = byId.get(noticeTaskId ?? '') ?? byId.get(noticeToolUseId ?? '');

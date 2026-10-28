@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
-import { getAgent, HerdrError, notify } from './herdr.ts';
+import { bestEffortNotify, cwdOf, getAgent, HerdrError, notify } from './herdr.ts';
 import { readLastReply } from './replies.ts';
 import { RelayError } from './roles.ts';
-import { cwdOf, run } from './run.ts';
+import { run } from './run.ts';
 
 async function copyToClipboard(text: string): Promise<void> {
   const candidates: [string, string[]][] =
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
   } catch (error) {
     const message = error instanceof RelayError || error instanceof HerdrError ? error.message : String(error);
     console.error(message);
-    if (!fromTerminal) await notify('Review relay failed', message, 'request').catch(() => undefined);
+    if (!fromTerminal) await bestEffortNotify(console.error)('Review relay failed', message, 'request');
     process.exitCode = 1;
   }
 }

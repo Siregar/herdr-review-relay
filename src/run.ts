@@ -2,12 +2,12 @@ import { loadConfig, type Config } from './config.ts';
 import { buildHandoff, fill, type Review } from './handoff.ts';
 import {
   bestEffortNotify,
+  cwdOf,
   getAgent,
   integrationStatus,
   listPanes,
   prompt,
   promptAndWait,
-  type Pane,
 } from './herdr.ts';
 import { findPullRequest, type PullRequest } from './pr.ts';
 import { readLastReply, readTurnState } from './replies.ts';
@@ -20,7 +20,6 @@ function log(message: string): void {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-export const cwdOf = (pane: Pane): string => pane.foreground_cwd ?? pane.cwd;
 
 const tryNotify = bestEffortNotify(log);
 
@@ -147,19 +146,19 @@ export async function run(invokingPaneId: string, dryRun: boolean): Promise<void
   try {
     await tryNotify(`${tag}: review started`, roles.qa.map((role) => role.title).join(', '));
     const limits = (timeoutMinutes: number): WaitLimits => ({ tag, timeoutMinutes, backgroundGraceMinutes: config.backgroundGraceMinutes });
-    const results = await Promise.allSettled(
-      roles.qa.map((role) => review(role, pr, config, records[role.pane.pane_id], limits(config.reviewTimeoutMinutes))),
-    );
-    await saveReviews(
-      Object.fromEntries(
-        results.flatMap((result, index) => (result.status === 'fulfilled' ? [[roles.qa[index].pane.pane_id, result.value.record]] : [])),
+    const outcomes = await Promise.all(
+      roles.qa.map((role) =>
+        review(role, pr, config, records[role.pane.pane_id], limits(config.reviewTimeoutMinutes)).then(
+          (done) => ({ role, ...done }),
+          (error: Error) => ({ role, error }),
+        ),
       ),
     );
+    const done = outcomes.filter((outcome) => 'review' in outcome);
+    const failures = outcomes.flatMap((outcome) => ('error' in outcome ? [`${outcome.role.title}: ${outcome.error.message}`] : []));
+    await saveReviews(Object.fromEntries(done.map(({ role, record }) => [role.pane.pane_id, record])));
 
-    const reviews = results.flatMap((result) => (result.status === 'fulfilled' ? [result.value.review] : []));
-    const failures = results.flatMap((result, index) =>
-      result.status === 'rejected' ? [`${roles.qa[index].title}: ${(result.reason as Error).message}`] : [],
-    );
+    const reviews = done.map((outcome) => outcome.review);
     const handoff = buildHandoff(fill(config.handoffIntro, { count: reviews.length, pr: pr.number }), reviews);
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const archived = await archive(`${stamp}-pr${pr.number}.md`, handoff);
