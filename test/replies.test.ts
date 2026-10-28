@@ -112,6 +112,8 @@ test('assistant text spans the whole session, without prompts or sub-agents', ()
   assert.equal(openCodeAssistantText(exported), 'PR 231\n\ndone');
 });
 
+const shell = (id: string) => ({ id, kind: 'shell' });
+const agent = (id: string) => ({ id, kind: 'agent' });
 const turnEnd = (seconds: number) => ({ type: 'system', subtype: 'turn_duration', timestamp: at(seconds) });
 const background = (seconds: number, id: string) =>
   assistant(seconds, [{ type: 'tool_use', id, name: 'Bash', input: { run_in_background: true } }]);
@@ -120,7 +122,7 @@ const notice = (seconds: number, id: string) =>
 
 test('turn: idle while a background task runs is not finished', () => {
   const transcript = jsonl(user(1, '/goal green ci'), background(2, 'toolu_ci'), assistant(3, [{ type: 'text', text: 'Waiting for CI.' }]), turnEnd(4));
-  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: ['toolu_ci'], turnOpen: false });
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [shell('toolu_ci')], turnOpen: false });
 });
 
 test('turn: a notice that has arrived but not been handled keeps the turn open', () => {
@@ -149,4 +151,168 @@ test('turn: background tasks from before the prompt and from sub-agents do not c
     turnEnd(4),
   );
   assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [], turnOpen: false });
+});
+
+// Shapes as Claude Code writes them: the async launch shows only in the tool result's `toolUseResult`.
+const launch = (seconds: number, id: string, name = 'Agent') =>
+  assistant(seconds, [{ type: 'tool_use', id, name, input: { description: 'review', prompt: 'review the diff' } }]);
+const launched = (seconds: number, id: string, toolUseResult: object, extra: object = {}) =>
+  user(seconds, [{ type: 'tool_result', tool_use_id: id, content: 'Async agent launched' }], { toolUseResult, ...extra });
+const asyncAgent = (agentId: string) => ({ isAsync: true, status: 'async_launched', agentId });
+const backgroundShell = (backgroundTaskId: string) => ({ backgroundTaskId, stdout: '', stderr: '' });
+const taskNotice = (seconds: number, taskId: string) =>
+  user(seconds, `<task-notification>\n<task-id>${taskId}</task-id>\n<status>completed</status>\n</task-notification>`);
+const stop = (seconds: number, name: string, input: object) => assistant(seconds, [{ type: 'tool_use', id: `toolu_${name}`, name, input }]);
+
+test('turn: background sub-agents count, though their tool call has no run_in_background', () => {
+  const transcript = jsonl(
+    user(1, '/mattpocock-skills:code-review 230'),
+    launch(2, 'toolu_standards'),
+    launch(2, 'toolu_spec'),
+    launched(3, 'toolu_standards', asyncAgent('a1')),
+    launched(3, 'toolu_spec', asyncAgent('a2')),
+    assistant(4, [{ type: 'text', text: 'I launched two reviewers.' }]),
+    turnEnd(5),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [agent('a1'), agent('a2')], turnOpen: false });
+});
+
+test('turn: a foreground command moved to the background counts', () => {
+  const transcript = jsonl(
+    user(1, '/goal green ci'),
+    launch(2, 'toolu_watch', 'Bash'),
+    launched(120, 'toolu_watch', { ...backgroundShell('b7'), timedOutAfterMs: 120_000 }),
+    turnEnd(121),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [shell('b7')], turnOpen: false });
+});
+
+test('turn: a notice with only a task id ends the task', () => {
+  const transcript = jsonl(
+    user(1, '/mattpocock-skills:code-review 230'),
+    launch(2, 'toolu_standards'),
+    launched(3, 'toolu_standards', asyncAgent('a1')),
+    turnEnd(4),
+    taskNotice(60, 'a1'),
+    assistant(61, [{ type: 'text', text: '## Standards' }]),
+    turnEnd(62),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [], turnOpen: false });
+});
+
+test('turn: a notice with only a tool use id ends a task the result named', () => {
+  const transcript = jsonl(
+    user(1, '/goal green ci'),
+    background(2, 'toolu_ci'),
+    launched(3, 'toolu_ci', backgroundShell('b1')),
+    turnEnd(4),
+    user(90, '<task-notification>\n<tool-use-id>toolu_ci</tool-use-id>\n</task-notification>'),
+    turnEnd(91),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [], turnOpen: false });
+});
+
+test('turn: a stopped task is over, though no notice arrives', () => {
+  const transcript = jsonl(
+    user(1, 'check the UI'),
+    background(2, 'toolu_dev'),
+    launched(3, 'toolu_dev', backgroundShell('b_dev')),
+    launch(4, 'toolu_old', 'Bash'),
+    launched(5, 'toolu_old', backgroundShell('b_old')),
+    launch(6, 'toolu_agent'),
+    launched(7, 'toolu_agent', asyncAgent('a9')),
+    stop(8, 'TaskStop', { task_id: 'b_dev' }),
+    stop(9, 'KillShell', { shell_id: 'b_old' }),
+    stop(10, 'KillBash', { shell_id: 'a9' }),
+    turnEnd(11),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [], turnOpen: false });
+});
+
+test('turn: launches by sub-agents and from before the prompt do not count', () => {
+  const transcript = jsonl(
+    launch(-600, 'toolu_dev', 'Bash'),
+    launched(-599, 'toolu_dev', backgroundShell('b_dev')),
+    user(1, 'here is the feedback'),
+    launch(2, 'toolu_sub', 'Bash'),
+    launched(3, 'toolu_sub', asyncAgent('a_sub'), { isSidechain: true }),
+    turnEnd(4),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [], turnOpen: false });
+});
+
+test('turn: a notice that arrives mid-turn, as a queued command, ends the task too', () => {
+  const notification = '<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>';
+  const transcript = jsonl(
+    user(1, '/mattpocock-skills:code-review 230'),
+    launch(2, 'toolu_standards'),
+    launched(3, 'toolu_standards', asyncAgent('a1')),
+    // Queued is not delivered: only the attachment puts the notice in front of the agent.
+    { type: 'queue-operation', operation: 'enqueue', timestamp: at(50), content: notification },
+    { type: 'attachment', timestamp: at(51), attachment: { type: 'queued_command', prompt: notification } },
+    assistant(52, [{ type: 'text', text: '## Standards' }]),
+    turnEnd(53),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [], turnOpen: false });
+});
+
+test('turn: a notice that is only queued has not reached the agent yet', () => {
+  const notification = '<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>';
+  const transcript = jsonl(
+    user(1, '/mattpocock-skills:code-review 230'),
+    launch(2, 'toolu_standards'),
+    launched(3, 'toolu_standards', asyncAgent('a1')),
+    turnEnd(4),
+    { type: 'queue-operation', operation: 'enqueue', timestamp: at(50), content: notification },
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [agent('a1')], turnOpen: false });
+});
+
+test('turn: a sub-agent resumed with SendMessage runs again until its next notice', () => {
+  const resumed = (seconds: number, id: string, agentId: string) =>
+    launched(seconds, id, { success: true, message: `Resuming agent ${agentId.slice(0, 7)}`, resumedAgentId: agentId });
+  const notice = (seconds: number, toolUseId: string) =>
+    user(seconds, `<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n</task-notification>`);
+  const rows = [
+    user(1, 'check the page'),
+    launch(2, 'toolu_qa'),
+    launched(3, 'toolu_qa', asyncAgent('a1')),
+    turnEnd(4),
+    notice(60, 'toolu_qa'),
+    assistant(61, [{ type: 'tool_use', id: 'toolu_resume', name: 'SendMessage', input: { to: 'a1', message: 're-check' } }]),
+    resumed(62, 'toolu_resume', 'a1'),
+    turnEnd(63),
+  ];
+  assert.deepEqual(claudeTurnState(jsonl(...rows), SENT), { pendingBackground: [agent('a1')], turnOpen: false });
+  const stale = jsonl(...rows, notice(64, 'toolu_qa'));
+  assert.deepEqual(claudeTurnState(stale, SENT).pendingBackground, [agent('a1')], 'a late notice of the first run');
+  const done = jsonl(...rows, notice(120, 'toolu_resume'), assistant(121, [{ type: 'text', text: 'Fixed.' }]), turnEnd(122));
+  assert.deepEqual(claudeTurnState(done, SENT), { pendingBackground: [], turnOpen: false });
+});
+
+test('turn: a revived sub-agent counts as running again', () => {
+  const transcript = jsonl(
+    user(1, 'check the page'),
+    launch(2, 'toolu_qa'),
+    launched(3, 'toolu_qa', asyncAgent('a1')),
+    taskNotice(60, 'a1'),
+    assistant(61, [{ type: 'tool_use', id: 'toolu_revive', name: 'SendMessage', input: { to: 'a1', message: 'again' } }]),
+    launched(62, 'toolu_revive', { success: true, revivedAgentId: 'a1' }),
+    turnEnd(63),
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [agent('a1')], turnOpen: false });
+});
+
+test('turn: a queued prompt with an image is not a notice, and does not break the reading', () => {
+  const transcript = jsonl(
+    user(1, 'check the page'),
+    background(2, 'toolu_ci'),
+    turnEnd(3),
+    {
+      type: 'attachment',
+      timestamp: at(4),
+      attachment: { type: 'queued_command', prompt: [{ type: 'text', text: '[Image #1] look' }, { type: 'image', source: {} }] },
+    },
+  );
+  assert.deepEqual(claudeTurnState(transcript, SENT), { pendingBackground: [shell('toolu_ci')], turnOpen: false });
 });

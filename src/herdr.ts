@@ -6,6 +6,7 @@ const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
 
 export type AgentKind = 'claude' | 'opencode';
 export type AgentStatus = 'idle' | 'done' | 'working' | 'blocked' | 'unknown';
+export type Sound = 'none' | 'done' | 'request';
 
 export interface Pane {
   pane_id: string;
@@ -17,6 +18,9 @@ export interface Pane {
   cwd: string;
   foreground_cwd?: string | null;
 }
+
+/** The directory the pane's foreground process works in. */
+export const cwdOf = (pane: Pane): string => pane.foreground_cwd ?? pane.cwd;
 
 export class HerdrError extends Error {
   readonly code: string;
@@ -66,8 +70,14 @@ export async function promptAndWait(target: string, text: string, timeoutMs: num
   return (result.agent as Pane).agent_status ?? 'unknown';
 }
 
-export async function notify(title: string, body: string, sound: 'none' | 'done' | 'request' = 'none'): Promise<void> {
+export async function notify(title: string, body: string, sound: Sound = 'none'): Promise<void> {
   await herdr(['notification', 'show', title, '--body', body, '--sound', sound]);
+}
+
+/** `notify` for notifications that are best effort: one that fails is logged, and the run goes on. */
+export function bestEffortNotify(log: (message: string) => void): typeof notify {
+  return (title, body, sound) =>
+    notify(title, body, sound).catch((error: Error) => log(`notification failed: ${error.message}`));
 }
 
 /** `herdr integration status` as `{ claude: 'current (v10)', opencode: 'not installed', ... }`. */

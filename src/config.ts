@@ -15,6 +15,8 @@ export interface Config {
   followUp: string | null;
   reviewTimeoutMinutes: number;
   engineeringTimeoutMinutes: number;
+  /** How long an idle agent's background shells may run on alone before the relay stops waiting for them. */
+  backgroundGraceMinutes: number;
 }
 
 export const DEFAULTS: Config = {
@@ -28,6 +30,7 @@ export const DEFAULTS: Config = {
   followUp: '/goal green ci, no merge conflicts and mergeable',
   reviewTimeoutMinutes: 90,
   engineeringTimeoutMinutes: 240,
+  backgroundGraceMinutes: 30,
 };
 
 function expect(ok: boolean, key: string, wanted: string): void {
@@ -49,7 +52,7 @@ export function parseConfig(raw: unknown): Config {
     expect(input.followUp === null || typeof input.followUp === 'string', 'followUp', 'a string or null');
     config.followUp = (input.followUp as string | null) || null;
   }
-  for (const key of ['reviewTimeoutMinutes', 'engineeringTimeoutMinutes'] as const) {
+  for (const key of ['reviewTimeoutMinutes', 'engineeringTimeoutMinutes', 'backgroundGraceMinutes'] as const) {
     if (input[key] === undefined) continue;
     expect(typeof input[key] === 'number' && input[key] > 0, key, 'a positive number');
     config[key] = input[key] as number;
@@ -68,6 +71,9 @@ export function parseConfig(raw: unknown): Config {
   } catch (_error) {
     expect(false, 'qaLabelPattern', 'a valid regular expression');
   }
+  // An alternative that matches the empty string reports every capture group, matched or not.
+  const groups = new RegExp(`${config.qaLabelPattern}|`).exec('')?.length ?? 1;
+  expect(groups > 1, 'qaLabelPattern', 'a regular expression with a capture group for the QA number');
   return config;
 }
 
