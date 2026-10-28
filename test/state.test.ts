@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
+import fsPromises, { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 
 // state.ts reads its directory once, on import.
 const dir = await mkdtemp(join(tmpdir(), 'review-relay-state-'));
@@ -62,4 +63,30 @@ test('lock: of relays starting at the same moment, one wins and the others are t
     }
     await (winners[0] as PromiseFulfilledResult<() => Promise<void>>).value();
   }
+  assert.deepEqual((await readdir(join(dir, 'locks'))).filter((name) => name.endsWith('.tmp')), [], 'no temporary file is left behind');
+});
+
+test('lock: another relay never finds the lock empty while it is being taken', async (t) => {
+  // An empty lock is stale: a relay that died while taking it. So a live relay's lock must never be
+  // empty, not even between creating the file and writing the pid. After every file operation of
+  // acquireLock, read the lock the way a relay starting at that moment would.
+  const lock = join(dir, 'locks', 'tab_watched.pid');
+  const seen: string[] = [];
+  for (const name of ['open', 'writeFile', 'link', 'rename', 'rm'] as const) {
+    const original = fsPromises[name] as (...args: unknown[]) => Promise<unknown>;
+    mock.method(fsPromises, name, async (...args: unknown[]) => {
+      const result = await original(...args);
+      seen.push(await readFile(lock, 'utf8').catch(() => '(none)'));
+      return result;
+    });
+  }
+  syncBuiltinESMExports();
+  t.after(() => {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const release = await acquireLock('tab_watched');
+  assert.ok(!seen.includes(''), `the lock was seen empty: ${JSON.stringify(seen)}`);
+  assert.ok(seen.includes(String(process.pid)), `the watch saw the lock taken: ${JSON.stringify(seen)}`);
+  await release();
 });

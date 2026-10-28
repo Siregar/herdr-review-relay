@@ -1,4 +1,5 @@
-import { mkdir, open, readFile, rename, rm, writeFile, type FileHandle } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { RelayError } from './roles.ts';
@@ -59,8 +60,9 @@ export async function acquireLock(tabId: string): Promise<() => Promise<void>> {
   const path = join(dir, `${tabId.replace(/[^\w-]/g, '_')}.pid`);
   try {
     const pid = Number((await readFile(path, 'utf8')).trim());
-    // An empty file is a relay that died between creating the lock and writing its pid; pid 0 would
-    // pass the liveness check, as the caller's own process group.
+    // A lock is never empty while a relay holds it (see below), so an empty or garbled one, such as
+    // an earlier version left when it died while taking it, is stale. Pid 0 would pass the liveness
+    // check, as the caller's own process group.
     if (Number.isInteger(pid) && pid > 0 && isRunning(pid)) {
       throw new RelayError(`A review relay is already running in this tab (pid ${pid})`);
     }
@@ -69,15 +71,18 @@ export async function acquireLock(tabId: string): Promise<() => Promise<void>> {
     if (error instanceof RelayError) throw error;
     // No lock file: nothing to clear.
   }
-  let handle: FileHandle;
+  // The pid is written first and the lock appears with it in one step: link() fails when the lock
+  // exists, so of two relays taking it at once, one gets EEXIST.
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, String(process.pid));
   try {
-    handle = await open(path, 'wx');
+    await link(temporary, path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     throw new RelayError('A review relay started in this tab at the same moment');
+  } finally {
+    await rm(temporary, { force: true });
   }
-  await handle.writeFile(String(process.pid));
-  await handle.close();
   return () => rm(path, { force: true });
 }
 
