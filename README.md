@@ -19,7 +19,7 @@ The relay only types into sessions that are already running. Model, effort and a
 ## Flow
 
 1. Press `prefix+a` in the tab.
-2. The PR is the one `gh pr view` finds for Engineering's checkout. If gh finds none, it is the last PR link Engineering wrote in its session.
+2. The PR is the one `gh pr view` finds for Engineering's checkout. If the branch has no PR, it is the last link Engineering wrote in its session to a PR in the checkout's repository; links to PRs in other repositories are passed over, and a session that links only those is refused. A failing gh (auth, network) stops the run with gh's error.
 3. Each QA pane gets its review command (`reviewPrompt`). A QA pane that already reviewed in its current session gets `/clear` first.
 4. The relay waits until every QA agent is done. When one stops at a question or an approval, you get a notification, and the wait goes on once you have answered; the time it waits for you does not count against the timeout, so the relay keeps the tab until you answer. For Claude Code, done needs more than herdr reporting idle. Its transcript must also show no background task still running and a closed turn, because the agent goes idle while it waits for a background task such as a CI watch or a background sub-agent. A background shell that never reports (a dev server, a watch loop) is given up once the agent has sat idle on shells alone for `backgroundGraceMinutes`; the run log names them. Background sub-agents are waited for until the timeout, since they always report.
 5. Engineering gets `handoffIntro`, followed by each review in a `<review from="QA #1" agent="Claude Code">` block.
@@ -86,7 +86,7 @@ Set `followUp` to `null` to skip it. `qaLabelPattern` needs a capture group for 
 
 ```sh
 pnpm install
-pnpm test        # node --test
+pnpm test        # node --test, about 15 s: a few tests run whole review rounds on the real clock
 pnpm typecheck
 node src/relay.ts run --dry-run --pane <pane id>   # roles, PR and prompts, sends nothing
 node src/relay.ts copy --pane <pane id> --stdout   # last reply to stdout
