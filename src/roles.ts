@@ -15,7 +15,10 @@ export class RelayError extends Error {
   }
 }
 
-/** A Review round that stopped after the relay typed into a pane; anything else it throws is a Refusal. */
+/**
+ * A Review round that stopped after the relay typed into a pane; anything else it throws is a Refusal.
+ * `run` draws the line at "review started", which the first prompt follows at once.
+ */
 export class Failure extends RelayError {}
 
 export interface Role {
@@ -36,6 +39,10 @@ export interface RoleLabels {
 }
 
 export const AGENT_NAMES: Record<AgentKind, string> = { claude: 'Claude Code', opencode: 'OpenCode' };
+
+/** herdr cannot name an agent's session without its integration for that agent. */
+export const integrationMissing = (kind: AgentKind): RelayError =>
+  new RelayError(`herdr does not know ${AGENT_NAMES[kind]} sessions`, `Run \`herdr integration install ${kind}\`.`);
 
 function agentKind(pane: Pane, title: string): AgentKind {
   if (pane.agent === 'claude' || pane.agent === 'opencode') return pane.agent;

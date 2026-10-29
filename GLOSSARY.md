@@ -38,3 +38,7 @@ _Avoid_: Error, failure, validation error
 **Failure**:
 A Review round that stops after the relay has typed into a pane, so part of the round has happened.
 _Avoid_: Error, crash, refusal
+
+**Crash**:
+An exception the relay cannot explain, which is a bug. It reaches the user as "Review relay crashed", as a Refusal or a Failure depending on when it happens; it is not another word for either.
+_Avoid_: Failure

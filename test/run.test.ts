@@ -41,11 +41,14 @@ if (group === 'integration') {
 } else if (group === 'pane' && action === 'list') {
   reply({ panes });
 } else if (group === 'agent' && action === 'get') {
-  reply({ agent: pane });
+  reply({ agent: pane.label.startsWith('QA') && process.env.FAKE_QA_GONE ? null : pane });
 } else if (group === 'agent' && action === 'prompt' && text === '/clear') {
   sessions[target] = sessions[target] + '+';
   writeFileSync(${JSON.stringify(sessions)}, JSON.stringify(sessions));
   reply({});
+} else if (group === 'agent' && action === 'prompt' && !pane.label.startsWith('QA') && process.env.FAKE_ENG_REFUSES) {
+  console.log(JSON.stringify({ error: { code: 'agent_blocked', message: 'agent is blocked' } }));
+  process.exit(1);
 } else if (group === 'agent' && action === 'prompt') {
   const at = (offset) => new Date(Date.now() + offset).toISOString();
   const qa = pane.label.startsWith('QA');
@@ -100,6 +103,8 @@ async function freshRound(): Promise<void> {
   delete process.env.FAKE_QA_SILENT;
   delete process.env.FAKE_QA_BLOCKED;
   delete process.env.FAKE_QA_STATUS;
+  delete process.env.FAKE_QA_GONE;
+  delete process.env.FAKE_ENG_REFUSES;
 }
 
 const { Failure, RelayError } = await import('../src/roles.ts');
@@ -162,6 +167,7 @@ test('run: a QA agent without a reply is a Failure that sends nothing to Enginee
       error.nextStep,
       'No review is saved, and nothing went to Engineering. Running the review relay again starts the round over: QA #1 reviews again.',
     );
+    assert.doesNotMatch(error.details ?? '', /reviews that finished/, 'no review finished, so no archive is offered');
     return true;
   });
   assert.deepEqual(promptsTo(await herdrCalls(), 'p_eng'), []);
@@ -185,4 +191,49 @@ test('run: an unexpected exception after the relay has typed is a Failure that s
   } finally {
     await rm(runs, { force: true });
   }
+});
+
+test('run: a crash inside a QA review says it crashed, not that the round can start over', ROUND, async () => {
+  await freshRound();
+  process.env.FAKE_QA_GONE = '1'; // herdr answers `agent get` for QA #1 without an agent.
+  await assert.rejects(run('p_eng', false), (error) => {
+    assert.ok(error instanceof Failure, `a Failure, not ${String(error)}`);
+    assert.equal(error.title, 'Review relay crashed');
+    assert.equal(error.nextStep, 'This is a bug. The stack trace is in `herdr plugin log list --plugin review-relay`.');
+    assert.match(error.details ?? '', /TypeError/);
+    return true;
+  });
+});
+
+test('run: a Handoff herdr refuses is a Failure that points at Engineering\'s pane and the saved Handoff', ROUND, async () => {
+  await freshRound();
+  process.env.FAKE_ENG_REFUSES = '1';
+  await assert.rejects(run('p_eng', false), (error) => {
+    assert.ok(error instanceof Failure, `a Failure, not ${String(error)}`);
+    assert.equal(error.title, 'Engineering: agent is blocked');
+    assert.equal(
+      error.nextStep,
+      "Check Engineering's pane; the Handoff is saved in the run archive. Running the review relay again starts the round over: QA #1 reviews again.",
+    );
+    return true;
+  });
+});
+
+test('relay: a Failure goes to a notification first, then to the popup, and the reasons reach stderr', ROUND, async () => {
+  await freshRound();
+  const { promisify } = await import('node:util');
+  const { execFile } = await import('node:child_process');
+  const outcome = await promisify(execFile)('node', ['src/relay.ts', 'run'], {
+    env: { ...process.env, HERDR_PANE_ID: 'p_eng', FAKE_QA_SILENT: '1' },
+  }).then(
+    () => ({ code: 0, stderr: '' }),
+    (error: { code: number; stderr: string }) => error,
+  );
+  assert.equal(outcome.code, 1);
+  const told = (await herdrCalls())
+    .filter(([group]) => group === 'notification' || group === 'plugin')
+    .map((call) => `${call[0]} ${call[0] === 'notification' ? call[2] : JSON.parse(call.at(-1)!.split('=').slice(1).join('=')).title}`);
+  assert.deepEqual(told.slice(-2), ['notification QA #1 ended without a review', 'plugin QA #1 ended without a review']);
+  assert.match(outcome.stderr, /"PR #231: review started" failed: notifications are down/, 'a dropped notification is logged on stderr');
+  assert.match(outcome.stderr, /notification "QA #1 ended without a review" failed/);
 });

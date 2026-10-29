@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 
 // The relay as herdr starts it, against a fake herdr: a tab with one pane and no QA panes, so `run`
 // refuses. FAKE_POPUP=refuse makes herdr refuse the popup, FAKE_PANE_LIST=broken makes `pane list`
-// answer without panes, and FAKE_AGENT=none puts no agent in the pane.
+// answer without panes, FAKE_AGENT=none puts no agent in the pane, and FAKE_HIDDEN=<reason> makes
+// herdr answer notifications with shown: false and that reason.
 const execFileAsync = promisify(execFile);
 const dir = await mkdtemp(join(tmpdir(), 'review-relay-main-'));
 const calls = join(dir, 'herdr-calls.jsonl');
@@ -23,7 +24,7 @@ const reply = (result) => console.log(JSON.stringify({ result }));
 const [group, action] = args;
 if (group === 'pane' && action === 'list') reply(process.env.FAKE_PANE_LIST === 'broken' ? {} : { panes: [pane] });
 else if (group === 'agent' && action === 'get') reply({ agent: pane });
-else if (group === 'notification') reply({ type: 'notification_show', shown: true, reason: 'shown' });
+else if (group === 'notification') reply({ type: 'notification_show', shown: !process.env.FAKE_HIDDEN, reason: process.env.FAKE_HIDDEN ?? 'shown' });
 else if (group === 'plugin' && process.env.FAKE_POPUP === 'refuse') {
   console.log(JSON.stringify({ error: { code: 'ui_busy', message: 'a herdr modal is open' } }));
   process.exit(1);
@@ -113,4 +114,10 @@ test('relay: an unexpected exception before anything is typed says it crashed, t
   const [popup] = popups(started);
   assert.equal(popupMessage(popup).title, 'Review relay crashed');
   assert.match(started.stderr, /TypeError/, 'the stack trace is in the plugin log');
+});
+
+test('relay: a notification herdr answers with shown: false is not taken as delivered, and its reason is logged', async () => {
+  const started = await relay(['run'], { FAKE_POPUP: 'refuse', FAKE_HIDDEN: 'no_foreground_client' });
+  assert.equal(notifications(started).length, 1);
+  assert.match(started.stderr, /not shown: no_foreground_client/);
 });

@@ -3,9 +3,9 @@ import { buildHandoff, fill, type Review } from './handoff.ts';
 import { cwdOf, getAgent, HerdrError, integrationStatus, listPanes, prompt, promptAndWait } from './herdr.ts';
 import { findPullRequest, type PullRequest } from './pr.ts';
 import { readLastReply, readTurnState } from './replies.ts';
-import { AGENT_NAMES, Failure, RelayError, resolveRoles, type Role, type Roles } from './roles.ts';
+import { AGENT_NAMES, Failure, integrationMissing, RelayError, resolveRoles, type Role, type Roles } from './roles.ts';
 import { acquireLock, archive, loadReviews, needsClear, saveReviews, type ReviewRecord, type ReviewRecords } from './state.ts';
-import { herdrTellDeps, inform, messageOf, tell, type Message } from './tell.ts';
+import { herdrTellDeps, inform, isCrash, messageOf, tell, type Message } from './tell.ts';
 import { waitUntilReady, type WaitOptions } from './wait.ts';
 
 function log(message: string): void {
@@ -14,7 +14,8 @@ function log(message: string): void {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-const tellDeps = herdrTellDeps(log);
+// What does not reach the user ends on stderr, which lands in the plugin log with the run log.
+const tellDeps = herdrTellDeps((line) => console.error(`${new Date().toISOString()} ${line}`));
 
 /** How long to wait for an agent, and what its notifications are tagged with. */
 type WaitLimits = Omit<WaitOptions, 'title'>;
@@ -24,7 +25,7 @@ async function checkIntegrations(roles: Role[]): Promise<void> {
   const statuses = await integrationStatus();
   for (const kind of new Set(roles.map((role) => role.kind))) {
     if (!statuses[kind] || statuses[kind].startsWith('not installed')) {
-      throw new RelayError(`herdr does not know ${AGENT_NAMES[kind]} sessions`, `Run \`herdr integration install ${kind}\`.`);
+      throw integrationMissing(kind);
     }
   }
 }
@@ -133,7 +134,8 @@ const names = (roles: Role[]): string =>
  * One review round: the QA panes review Engineering's PR, and their reviews go to Engineering in one
  * prompt, followed by `followUp`. With `dryRun`, prints the roles, PR and prompts and sends nothing.
  * Everything it throws before "review started" is a Refusal. After that it types into the panes right
- * away, so everything it throws is a `Failure`.
+ * away, so everything it throws is a `Failure`: the user has been told the round started, and a
+ * prompt herdr rejects may still have reached the pane.
  */
 export async function run(invokingPaneId: string, dryRun: boolean): Promise<void> {
   const config = await loadConfig();
@@ -175,7 +177,7 @@ export async function run(invokingPaneId: string, dryRun: boolean): Promise<void
   try {
     // The first prompt follows "review started" at once, so whatever stops the round from here is a Failure.
     await inform(tellDeps, `${tag}: review started`, roles.qa.map((role) => role.title).join(', '), 'none');
-    await round(roles, pr, config, records);
+    await reviewRound(roles, pr, config, records);
   } catch (error) {
     if (error instanceof Failure) throw error;
     const message = messageOf(error);
@@ -186,7 +188,7 @@ export async function run(invokingPaneId: string, dryRun: boolean): Promise<void
 }
 
 /** The part of `run` that types into panes: every QA reviews, then Engineering gets the Handoff and the Follow-up. */
-async function round(roles: Roles, pr: PullRequest, config: Config, records: ReviewRecords): Promise<void> {
+async function reviewRound(roles: Roles, pr: PullRequest, config: Config, records: ReviewRecords): Promise<void> {
   const tag = `PR #${pr.number}`;
   const startOver = `Running the review relay again starts the round over: ${reviewsAgain(roles.qa)}.`;
   const limits = (timeoutMinutes: number): WaitLimits => ({ tag, timeoutMinutes, backgroundGraceMinutes: config.backgroundGraceMinutes });
@@ -194,7 +196,7 @@ async function round(roles: Roles, pr: PullRequest, config: Config, records: Rev
     roles.qa.map((role) =>
       review(role, pr, config, records[role.pane.pane_id], limits(config.reviewTimeoutMinutes)).then(
         (done) => ({ role, ...done }),
-        (error: unknown) => ({ role, stop: stopMessage(role, error) }),
+        (error: unknown) => ({ role, error, stop: stopMessage(role, error) }),
       ),
     ),
   );
@@ -207,6 +209,8 @@ async function round(roles: Roles, pr: PullRequest, config: Config, records: Rev
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const archived = await archive(`${stamp}-pr${pr.number}.md`, handoff);
   log(`handoff archived at ${archived}`);
+  const crash = failed.find((outcome) => isCrash(outcome.error));
+  if (crash) throw crash.error; // run() reports it as a crash, with its stack.
   if (failed.length > 0) {
     const finishedQa = done.map((outcome) => outcome.role);
     const saved =
@@ -216,31 +220,31 @@ async function round(roles: Roles, pr: PullRequest, config: Config, records: Rev
     throw new Failure(
       failed.length === 1 ? failed[0].stop.title : `${names(failed.map((outcome) => outcome.role))} did not finish their reviews`,
       `${saved} ${startOver}`,
-      `${detailsOf(failed.map((outcome) => outcome.stop))}\nThe reviews that finished are in ${archived}`,
+      [detailsOf(failed.map((outcome) => outcome.stop)), ...(done.length > 0 ? [`The reviews that finished are in ${archived}`] : [])].join('\n'),
     );
   }
 
   const engineering = roles.engineering;
   const engineeringLimits = limits(config.engineeringTimeoutMinutes);
+  /** Sends Engineering a prompt; when that stops, `title` and `nextStep` say what the user does about it. */
+  const promptEngineering = async (text: string, title: (stop: string) => string, nextStep: string): Promise<void> => {
+    try {
+      await promptUntilReady(engineering, text, engineeringLimits);
+    } catch (error) {
+      if (isCrash(error)) throw error;
+      const message = stopMessage(engineering, error);
+      throw new Failure(title(message.title), nextStep, `${detailsOf([message])}\nThe Handoff is in ${archived}`);
+    }
+  };
   log(`${engineering.title}: handoff, ${handoff.length} characters`);
-  try {
-    await promptUntilReady(engineering, handoff, engineeringLimits);
-  } catch (error) {
-    const message = stopMessage(engineering, error);
-    throw new Failure(message.title, `${engineering.title} has the QA feedback; check its pane. ${startOver}`, detailsOf([message]));
-  }
+  await promptEngineering(handoff, (stop) => stop, `Check ${engineering.title}'s pane; the Handoff is saved in the run archive. ${startOver}`);
   if (config.followUp) {
     log(`${engineering.title}: ${config.followUp}`);
-    try {
-      await promptUntilReady(engineering, fill(config.followUp, { pr: pr.number }), engineeringLimits);
-    } catch (error) {
-      const message = stopMessage(engineering, error);
-      throw new Failure(
-        `${engineering.title}'s follow-up stopped: ${message.title}`,
-        `${engineering.title} has worked in the QA feedback; check its pane before you run the review relay again.`,
-        detailsOf([message]),
-      );
-    }
+    await promptEngineering(
+      fill(config.followUp, { pr: pr.number }),
+      (stop) => `${engineering.title}'s follow-up stopped: ${stop}`,
+      `${engineering.title} has worked in the QA feedback; check its pane before you run the review relay again.`,
+    );
   }
   await inform(tellDeps, `${tag} is ready for you`, 'QA feedback is worked in and the follow-up has finished.', 'done');
   log('done');

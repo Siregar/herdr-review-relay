@@ -1,9 +1,11 @@
 import { execFile } from 'node:child_process';
 import { cwdOf, getAgent } from './herdr.ts';
 import { readLastReply } from './replies.ts';
-import { AGENT_NAMES, Failure, RelayError } from './roles.ts';
+import { Failure, integrationMissing, RelayError } from './roles.ts';
 import { run } from './run.ts';
 import { herdrTellDeps, inform, messageOf, messageText, tell } from './tell.ts';
+
+const tellDeps = herdrTellDeps(console.error);
 
 async function copyToClipboard(text: string): Promise<void> {
   const candidates: [string, string[]][] =
@@ -19,7 +21,8 @@ async function copyToClipboard(text: string): Promise<void> {
       // Try the next clipboard tool.
     }
   }
-  throw new RelayError('No clipboard tool found', 'Install wl-copy or xclip.', `Tried ${candidates.map(([command]) => command).join(', ')}.`);
+  const install = process.platform === 'darwin' ? 'Check that pbcopy is on your PATH.' : 'Install wl-copy or xclip.';
+  throw new RelayError('No clipboard tool found', install, `Tried ${candidates.map(([command]) => command).join(', ')}.`);
 }
 
 async function copy(paneId: string, toStdout: boolean): Promise<void> {
@@ -28,9 +31,7 @@ async function copy(paneId: string, toStdout: boolean): Promise<void> {
     throw new RelayError('This pane runs no agent', 'Focus a Claude Code or OpenCode pane.');
   }
   const sessionId = agent.agent_session?.value;
-  if (!sessionId) {
-    throw new RelayError(`herdr does not know ${AGENT_NAMES[agent.agent]} sessions`, `Run \`herdr integration install ${agent.agent}\`.`);
-  }
+  if (!sessionId) throw integrationMissing(agent.agent);
   const text = await readLastReply(agent.agent, sessionId, cwdOf(agent), 0);
   if (!text) throw new RelayError('No reply to copy yet', 'Ask the agent something first.');
   if (toStdout) {
@@ -38,7 +39,7 @@ async function copy(paneId: string, toStdout: boolean): Promise<void> {
     return;
   }
   await copyToClipboard(text);
-  await inform(herdrTellDeps(console.error), 'Copied the last reply', `${text.length} characters`, 'none');
+  await inform(tellDeps, 'Copied the last reply', `${text.length} characters`, 'none');
 }
 
 function option(args: string[], name: string): string | undefined {
@@ -59,7 +60,7 @@ async function main(): Promise<void> {
   } catch (error) {
     const message = messageOf(error);
     if (fromTerminal) console.error(messageText(message));
-    else await tell(herdrTellDeps(console.error), error instanceof Failure ? 'failure' : 'refusal', message);
+    else await tell(tellDeps, error instanceof Failure ? 'failure' : 'refusal', message);
     process.exitCode = 1;
   }
 }

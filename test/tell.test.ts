@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { HerdrError, type Notified } from '../src/herdr.ts';
 import { RelayError } from '../src/roles.ts';
-import { inform, messageOf, renderPopup, tell, type Message, type TellDeps } from '../src/tell.ts';
+import { closesPopup, inform, messageOf, renderPopup, tell, type Message, type TellDeps } from '../src/tell.ts';
 
 const MESSAGE: Message = {
   title: 'No PR for feat/login',
@@ -161,4 +161,9 @@ test('no message names a key: keybindings are the user\'s own', async () => {
       .join('\n');
     assert.doesNotMatch(code, /prefix\+|\bpress(es)? (the |a )?key|\bctrl\+/i, `${file} names a key`);
   }
+});
+
+test('popup: Enter, Esc and Ctrl-C close it; an arrow key, which starts with Esc too, does not', () => {
+  for (const keys of ['\r', '\n', '\x1b', '\x03']) assert.equal(closesPopup(keys), true, JSON.stringify(keys));
+  for (const keys of ['\x1b[A', 'q', ' ']) assert.equal(closesPopup(keys), false, JSON.stringify(keys));
 });

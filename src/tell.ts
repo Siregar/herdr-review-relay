@@ -79,7 +79,10 @@ export async function inform(deps: TellDeps, title: string, body: string, sound:
   await notified(deps, title, body, sound);
 }
 
-/** What to tell the user about an error. One that is neither a RelayError nor a HerdrError is a bug. */
+/** An error the relay cannot explain: neither a RelayError nor a HerdrError, so a bug. */
+export const isCrash = (error: unknown): boolean => !(error instanceof RelayError || error instanceof HerdrError);
+
+/** What to tell the user about an error. A crash says it is a bug, whenever it happens. */
 export function messageOf(error: unknown): Message {
   if (error instanceof RelayError) {
     return { title: error.title, nextStep: error.nextStep, ...(error.details ? { details: error.details } : {}) };
@@ -101,6 +104,11 @@ export function messageOf(error: unknown): Message {
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
+
+/** Enter, Esc and Ctrl-C close the popup. An arrow key starts with Esc too; only Esc on its own closes. */
+export function closesPopup(keys: string): boolean {
+  return keys === '\x1b' || keys === '\x03' || keys.includes('\r') || keys.includes('\n');
+}
 
 /** What the popup prints: the cause as heading, the next step, then the details under their own heading. */
 export function renderPopup(message: Message): string {

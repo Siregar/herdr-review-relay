@@ -38,7 +38,7 @@ Every message names its cause in the title and one next step in the body, such a
 - **"needs you"** follows the Failure route: notification first, the popup when it is not shown.
 - **"review started", "ready" and "Copied"** are notifications only. One that herdr does not show is left in the log, never in a popup, since a popup takes the keyboard until you close it.
 
-Starting the relay always ends in one visible message: a Refusal or "review started". A crash says "Review relay crashed" through the same channels, with the stack trace in the plugin log. Runs from a terminal (`--dry-run`, `--stdout`) print their messages to the terminal only.
+Starting the relay always ends in exactly one message: a Refusal or "review started". "review started" is a notification only, so with `system` delivery it can end up in the log alone. A crash says "Review relay crashed" through the same channels, with the stack trace in the plugin log. Runs from a terminal (`--dry-run`, `--stdout`) print their messages to the terminal only.
 
 See [ADR 0001](docs/adr/0001-refusals-as-popup.md) for why a Refusal opens a popup rather than a notification.
 
