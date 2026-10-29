@@ -70,14 +70,27 @@ export async function promptAndWait(target: string, text: string, timeoutMs: num
   return (result.agent as Pane).agent_status ?? 'unknown';
 }
 
-export async function notify(title: string, body: string, sound: Sound = 'none'): Promise<void> {
-  await herdr(['notification', 'show', title, '--body', body, '--sound', sound]);
+/** herdr's answer to a notification. `ok` alone does not mean the user saw it; only `shown` does. */
+export interface Notified {
+  shown: boolean;
+  /** `shown`, `disabled`, `rate_limited`, `no_foreground_client` or `busy`. */
+  reason: string;
 }
 
-/** `notify` for notifications that are best effort: one that fails is logged, and the run goes on. */
-export function bestEffortNotify(log: (message: string) => void): typeof notify {
-  return (title, body, sound) =>
-    notify(title, body, sound).catch((error: Error) => log(`notification failed: ${error.message}`));
+/** Shows a notification through the user's `[ui.toast] delivery`, which may drop it; see `Notified`. */
+export async function notify(title: string, body: string, sound: Sound = 'none'): Promise<Notified> {
+  const result = await herdr(['notification', 'show', title, '--body', body, '--sound', sound]);
+  return { shown: result.shown === true, reason: typeof result.reason === 'string' ? result.reason : 'no reason given' };
+}
+
+/**
+ * Opens one of this plugin's `[[panes]]` entrypoints, with `env` for its process. herdr refuses a
+ * popup while one of its own modals is open (`ui_busy`) or no client is attached.
+ */
+export async function openPane(entrypoint: string, env: Record<string, string>): Promise<void> {
+  const plugin = process.env.HERDR_PLUGIN_ID ?? 'review-relay';
+  const envArgs = Object.entries(env).flatMap(([key, value]) => ['--env', `${key}=${value}`]);
+  await herdr(['plugin', 'pane', 'open', '--plugin', plugin, '--entrypoint', entrypoint, ...envArgs]);
 }
 
 /** `herdr integration status` as `{ claude: 'current (v10)', opencode: 'not installed', ... }`. */

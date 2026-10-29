@@ -6,7 +6,8 @@ import { test } from 'node:test';
 
 // A whole review round against fake herdr and gh binaries, in a home and state directory of its own.
 // The fake herdr plays both agents: a prompt writes the prompt, a reply and a turn end into the pane's
-// transcript, and /clear starts a new session, the way Claude Code does. Every notification fails.
+// transcript, and /clear starts a new session, the way Claude Code does. Every notification and
+// every popup fails.
 const dir = await mkdtemp(join(tmpdir(), 'review-relay-run-'));
 const projects = join(dir, '.claude', 'projects', 'repo');
 const calls = join(dir, 'herdr-calls.jsonl');
@@ -27,7 +28,11 @@ const { join } = require('node:path');
 const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
 const sessions = JSON.parse(readFileSync(${JSON.stringify(sessions)}, 'utf8'));
-const panes = ${JSON.stringify(panes)}.map((pane) => ({ ...pane, agent_session: { value: sessions[pane.pane_id] } }));
+const panes = ${JSON.stringify(panes)}.map((pane) => ({
+  ...pane,
+  agent_session: { value: sessions[pane.pane_id] },
+  ...(pane.label.startsWith('QA') && process.env.FAKE_QA_STATUS ? { agent_status: process.env.FAKE_QA_STATUS } : {}),
+}));
 const reply = (result) => console.log(JSON.stringify({ result }));
 const [group, action, target, text] = args;
 const pane = panes.find((candidate) => candidate.pane_id === target);
@@ -94,7 +99,10 @@ async function freshRound(): Promise<void> {
   await rm(calls, { force: true });
   delete process.env.FAKE_QA_SILENT;
   delete process.env.FAKE_QA_BLOCKED;
+  delete process.env.FAKE_QA_STATUS;
 }
+
+const { Failure, RelayError } = await import('../src/roles.ts');
 
 test('run: failing notifications, also while a QA agent is blocked, do not stop the round', ROUND, async () => {
   await freshRound();
@@ -104,6 +112,9 @@ test('run: failing notifications, also while a QA agent is blocked, do not stop 
   const all = await herdrCalls();
   const notifications = all.filter(([group]) => group === 'notification').map((call) => call[2]);
   assert.deepEqual(notifications, ['PR #231: review started', 'PR #231: QA #1 needs you', 'PR #231 is ready for you']);
+  const popups = all.filter(([group, action]) => group === 'plugin' && action === 'pane');
+  assert.equal(popups.length, 1, '"needs you" falls back to the popup; "review started" and "ready" never do');
+  assert.match(popups[0].join(' '), /QA #1 needs you/);
   assert.equal(promptsTo(all, 'p_qa1').at(-1), '/mattpocock-skills:code-review 231');
   const [handoff, followUp] = promptsTo(all, 'p_eng');
   assert.match(handoff, /<review from="QA #1" agent="Claude Code">\n## Review\nOne finding in src\/a\.ts:12\.\n<\/review>/);
@@ -127,11 +138,51 @@ test('run: a QA pane is recorded with the session it reviewed in, so the next ro
   assert.equal((await recorded()).p_qa1.sessionId, await currentSession('p_qa1'));
 });
 
-test('run: a QA agent without a reply sends nothing to Engineering, and the round is archived', ROUND, async () => {
+test('run: a busy pane is a Refusal, and nothing is typed into any pane', ROUND, async () => {
+  await freshRound();
+  process.env.FAKE_QA_STATUS = 'working';
+  await assert.rejects(run('p_eng', false), (error) => {
+    assert.ok(error instanceof RelayError && !(error instanceof Failure), `a Refusal, not ${String(error)}`);
+    assert.equal(error.title, 'QA #1 is still working');
+    assert.equal(error.nextStep, 'Run the review relay again once it is idle.');
+    return true;
+  });
+  const typed = (await herdrCalls()).filter(([group, action]) => group === 'agent' && action === 'prompt');
+  assert.deepEqual(typed, []);
+});
+
+test('run: a QA agent without a reply is a Failure that sends nothing to Engineering, and the round is archived', ROUND, async () => {
   await freshRound();
   process.env.FAKE_QA_SILENT = '1';
   const archivedBefore = (await readdir(join(dir, 'state', 'runs'))).length;
-  await assert.rejects(run('p_eng', false), /QA #1 finished without a reply.*Nothing was sent to Engineering/);
+  await assert.rejects(run('p_eng', false), (error) => {
+    assert.ok(error instanceof Failure, `a Failure, not ${String(error)}`);
+    assert.equal(error.title, 'QA #1 ended without a review');
+    assert.equal(
+      error.nextStep,
+      'No review is saved, and nothing went to Engineering. Running the review relay again starts the round over: QA #1 reviews again.',
+    );
+    return true;
+  });
   assert.deepEqual(promptsTo(await herdrCalls(), 'p_eng'), []);
   assert.equal((await readdir(join(dir, 'state', 'runs'))).length, archivedBefore + 1);
+});
+
+test('run: an unexpected exception after the relay has typed is a Failure that says it crashed', ROUND, async () => {
+  await freshRound();
+  // A file where the archive folder should be: writing the handoff throws, after QA #1 has reviewed.
+  const runs = join(dir, 'state', 'runs');
+  await rm(runs, { recursive: true, force: true });
+  await writeFile(runs, '');
+  try {
+    await assert.rejects(run('p_eng', false), (error) => {
+      assert.ok(error instanceof Failure, `a Failure, not ${String(error)}`);
+      assert.equal(error.title, 'Review relay crashed');
+      assert.match(error.details ?? '', /ENOTDIR|EEXIST/);
+      return true;
+    });
+    assert.notDeepEqual(promptsTo(await herdrCalls(), 'p_qa1'), [], 'the premise: QA #1 was typed into');
+  } finally {
+    await rm(runs, { force: true });
+  }
 });

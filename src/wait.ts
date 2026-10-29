@@ -1,6 +1,7 @@
-import type { AgentStatus, Sound } from './herdr.ts';
+import type { AgentStatus } from './herdr.ts';
 import type { TurnState } from './replies.ts';
 import { RelayError } from './roles.ts';
+import type { Message } from './tell.ts';
 
 const MINUTE = 60_000;
 const POLL_MS = 10_000;
@@ -16,8 +17,8 @@ export interface WaitDeps {
   turn(since: number): Promise<TurnState | null>;
   now(): number;
   sleep(ms: number): Promise<void>;
-  /** Best effort: a notification that fails must not end the wait. */
-  notify(title: string, body: string, sound: Sound): Promise<void>;
+  /** Tells the user the agent waits for them. Best effort: a message that does not get through must not end the wait. */
+  needsYou(message: Message): Promise<void>;
   log(message: string): void;
 }
 
@@ -38,7 +39,7 @@ export interface WaitOptions {
  * sub-agent is waited for until the deadline: it always reports or is stopped, and abandoning it
  * would take its "I launched the reviewers" for the review.
  *
- * While the agent waits at a question or an approval, the user gets a notification, and the
+ * While the agent waits at a question or an approval, the user is told so, and the
  * deadline stands still until they have answered.
  */
 export async function waitUntilReady(deps: WaitDeps, options: WaitOptions): Promise<void> {
@@ -56,7 +57,10 @@ export async function waitUntilReady(deps: WaitDeps, options: WaitOptions): Prom
       if (blockedSince === null) {
         blockedSince = now;
         deps.log(`${title} is blocked`);
-        await deps.notify(`${tag}: ${title} needs you`, 'It is waiting at a question or an approval.', 'request');
+        await deps.needsYou({
+          title: `${tag}: ${title} needs you`,
+          nextStep: 'Answer its question or approval in its pane; the review round goes on after that.',
+        });
       }
       openSince = null;
       shellsOnlySince = null;
@@ -95,7 +99,9 @@ export async function waitUntilReady(deps: WaitDeps, options: WaitOptions): Prom
         shellsOnlySince = null;
       }
     }
-    if (blockedSince === null && deps.now() >= end) throw new RelayError(`Timed out after ${options.timeoutMinutes} minutes`);
+    if (blockedSince === null && deps.now() >= end) {
+      throw new RelayError(`${title} timed out after ${options.timeoutMinutes} min`, 'Check its pane.');
+    }
     await deps.sleep(POLL_MS);
     status = await deps.status();
   }

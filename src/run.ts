@@ -1,18 +1,11 @@
 import { loadConfig, type Config } from './config.ts';
 import { buildHandoff, fill, type Review } from './handoff.ts';
-import {
-  bestEffortNotify,
-  cwdOf,
-  getAgent,
-  integrationStatus,
-  listPanes,
-  prompt,
-  promptAndWait,
-} from './herdr.ts';
+import { cwdOf, getAgent, HerdrError, integrationStatus, listPanes, prompt, promptAndWait } from './herdr.ts';
 import { findPullRequest, type PullRequest } from './pr.ts';
 import { readLastReply, readTurnState } from './replies.ts';
-import { AGENT_NAMES, RelayError, resolveRoles, type Role } from './roles.ts';
-import { acquireLock, archive, loadReviews, needsClear, saveReviews, type ReviewRecord } from './state.ts';
+import { AGENT_NAMES, Failure, RelayError, resolveRoles, type Role, type Roles } from './roles.ts';
+import { acquireLock, archive, loadReviews, needsClear, saveReviews, type ReviewRecord, type ReviewRecords } from './state.ts';
+import { herdrTellDeps, inform, messageOf, tell, type Message } from './tell.ts';
 import { waitUntilReady, type WaitOptions } from './wait.ts';
 
 function log(message: string): void {
@@ -21,7 +14,7 @@ function log(message: string): void {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-const tryNotify = bestEffortNotify(log);
+const tellDeps = herdrTellDeps(log);
 
 /** How long to wait for an agent, and what its notifications are tagged with. */
 type WaitLimits = Omit<WaitOptions, 'title'>;
@@ -31,9 +24,20 @@ async function checkIntegrations(roles: Role[]): Promise<void> {
   const statuses = await integrationStatus();
   for (const kind of new Set(roles.map((role) => role.kind))) {
     if (!statuses[kind] || statuses[kind].startsWith('not installed')) {
-      throw new RelayError(`herdr's ${AGENT_NAMES[kind]} integration is not installed: herdr integration install ${kind}`);
+      throw new RelayError(`herdr does not know ${AGENT_NAMES[kind]} sessions`, `Run \`herdr integration install ${kind}\`.`);
     }
   }
+}
+
+/** Refuses a pane that is not idle: the relay would type into the middle of its turn. */
+function checkIdle(role: Role): void {
+  const status = role.pane.agent_status;
+  if (status === 'idle' || status === 'done') return;
+  if (status === 'blocked') {
+    throw new RelayError(`${role.title} is waiting for you`, 'Answer its question or approval, then run the review relay again.');
+  }
+  const title = status === 'working' ? `${role.title} is still working` : `herdr cannot tell whether ${role.title} is idle`;
+  throw new RelayError(title, 'Run the review relay again once it is idle.', `Pane ${role.pane.pane_id} is ${status ?? 'unknown'}.`);
 }
 
 /** Sends the text and waits until the agent has finished; see `waitUntilReady`. */
@@ -49,7 +53,9 @@ async function promptUntilReady(role: Role, text: string, limits: WaitLimits): P
       },
       now: Date.now,
       sleep,
-      notify: tryNotify,
+      needsYou: async (message) => {
+        await tell(tellDeps, 'needsYou', message);
+      },
       log,
     },
     { title: role.title, ...limits },
@@ -65,7 +71,7 @@ async function clearContext(role: Role): Promise<void> {
     if (role.kind === 'opencode') continue; // OpenCode opens its new session with the next prompt.
     if ((await getAgent(role.pane.pane_id)).agent_session?.value !== before) return;
   }
-  if (role.kind === 'claude') throw new RelayError(`${role.title} did not start a new session after /clear`);
+  if (role.kind === 'claude') throw new RelayError(`${role.title} did not start a new session after /clear`, 'Check its pane.');
 }
 
 async function review(
@@ -85,10 +91,16 @@ async function review(
   await promptUntilReady(role, reviewPrompt, limits);
 
   const sessionId = (await getAgent(role.pane.pane_id)).agent_session?.value;
-  if (!sessionId) throw new RelayError(`${role.title}: herdr reports no session for this ${AGENT_NAMES[role.kind]} pane`);
+  if (!sessionId) {
+    throw new RelayError(`herdr lost ${role.title}'s session`, 'Check its pane.', `Pane ${role.pane.pane_id} reports no session.`);
+  }
   const text = await readLastReply(role.kind, sessionId, cwdOf(role.pane), sentAt);
   if (!text) {
-    throw new RelayError(`${role.title} finished without a reply to the review prompt; its pane shows why (a failed model call, a usage limit)`);
+    throw new RelayError(
+      `${role.title} ended without a review`,
+      'Check its pane.',
+      'Its pane shows why: a failed model call, a usage limit.',
+    );
   }
 
   log(`${role.title}: reply has ${text.length} characters`);
@@ -98,9 +110,30 @@ async function review(
   };
 }
 
+/** What stopped a role. A herdr error names the role, so the title says who stopped. */
+function stopMessage(role: Role, error: unknown): Message {
+  const message = messageOf(error);
+  return error instanceof HerdrError ? { ...message, title: `${role.title}: ${error.message}` } : message;
+}
+
+const detailsOf = (messages: Message[]): string =>
+  messages.map((message) => [message.title, message.details].filter(Boolean).join(': ')).join('\n');
+
+/** "QA #1 reviews again", "both QA panes review again", "every QA pane reviews again". */
+function reviewsAgain(qa: Role[]): string {
+  if (qa.length === 1) return `${qa[0].title} reviews again`;
+  return qa.length === 2 ? 'both QA panes review again' : 'every QA pane reviews again';
+}
+
+/** The names, as "QA #1", "QA #1 and QA #2", "QA #1, QA #2 and QA #3". */
+const names = (roles: Role[]): string =>
+  roles.length === 1 ? roles[0].title : `${roles.slice(0, -1).map((role) => role.title).join(', ')} and ${roles.at(-1)!.title}`;
+
 /**
  * One review round: the QA panes review Engineering's PR, and their reviews go to Engineering in one
  * prompt, followed by `followUp`. With `dryRun`, prints the roles, PR and prompts and sends nothing.
+ * Everything it throws before "review started" is a Refusal. After that it types into the panes right
+ * away, so everything it throws is a `Failure`.
  */
 export async function run(invokingPaneId: string, dryRun: boolean): Promise<void> {
   const config = await loadConfig();
@@ -136,47 +169,79 @@ export async function run(invokingPaneId: string, dryRun: boolean): Promise<void
   }
 
   await checkIntegrations(everyone);
-  for (const role of everyone) {
-    if (role.pane.agent_status !== 'idle' && role.pane.agent_status !== 'done') {
-      throw new RelayError(`${role.title} is ${role.pane.agent_status}; start the relay once it is idle`);
-    }
-  }
+  everyone.forEach(checkIdle);
 
   const release = await acquireLock(roles.engineering.pane.tab_id);
   try {
-    await tryNotify(`${tag}: review started`, roles.qa.map((role) => role.title).join(', '));
-    const limits = (timeoutMinutes: number): WaitLimits => ({ tag, timeoutMinutes, backgroundGraceMinutes: config.backgroundGraceMinutes });
-    const outcomes = await Promise.all(
-      roles.qa.map((role) =>
-        review(role, pr, config, records[role.pane.pane_id], limits(config.reviewTimeoutMinutes)).then(
-          (done) => ({ role, ...done }),
-          (error: Error) => ({ role, error }),
-        ),
-      ),
-    );
-    const done = outcomes.filter((outcome) => 'review' in outcome);
-    const failures = outcomes.flatMap((outcome) => ('error' in outcome ? [`${outcome.role.title}: ${outcome.error.message}`] : []));
-    await saveReviews(Object.fromEntries(done.map(({ role, record }) => [role.pane.pane_id, record])));
-
-    const reviews = done.map((outcome) => outcome.review);
-    const handoff = buildHandoff(fill(config.handoffIntro, { count: reviews.length, pr: pr.number }), reviews);
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const archived = await archive(`${stamp}-pr${pr.number}.md`, handoff);
-    log(`handoff archived at ${archived}`);
-    if (failures.length > 0) {
-      throw new RelayError(`${failures.join('; ')}. Nothing was sent to Engineering; the other reviews are in ${archived}`);
-    }
-
-    const engineeringLimits = limits(config.engineeringTimeoutMinutes);
-    log(`${roles.engineering.title}: handoff, ${handoff.length} characters`);
-    await promptUntilReady(roles.engineering, handoff, engineeringLimits);
-    if (config.followUp) {
-      log(`${roles.engineering.title}: ${config.followUp}`);
-      await promptUntilReady(roles.engineering, fill(config.followUp, { pr: pr.number }), engineeringLimits);
-    }
-    await tryNotify(`${tag} is ready for you`, 'QA feedback is worked in and the follow-up has finished.', 'done');
-    log('done');
+    // The first prompt follows "review started" at once, so whatever stops the round from here is a Failure.
+    await inform(tellDeps, `${tag}: review started`, roles.qa.map((role) => role.title).join(', '), 'none');
+    await round(roles, pr, config, records);
+  } catch (error) {
+    if (error instanceof Failure) throw error;
+    const message = messageOf(error);
+    throw new Failure(message.title, message.nextStep, message.details);
   } finally {
     await release();
   }
+}
+
+/** The part of `run` that types into panes: every QA reviews, then Engineering gets the Handoff and the Follow-up. */
+async function round(roles: Roles, pr: PullRequest, config: Config, records: ReviewRecords): Promise<void> {
+  const tag = `PR #${pr.number}`;
+  const startOver = `Running the review relay again starts the round over: ${reviewsAgain(roles.qa)}.`;
+  const limits = (timeoutMinutes: number): WaitLimits => ({ tag, timeoutMinutes, backgroundGraceMinutes: config.backgroundGraceMinutes });
+  const outcomes = await Promise.all(
+    roles.qa.map((role) =>
+      review(role, pr, config, records[role.pane.pane_id], limits(config.reviewTimeoutMinutes)).then(
+        (done) => ({ role, ...done }),
+        (error: unknown) => ({ role, stop: stopMessage(role, error) }),
+      ),
+    ),
+  );
+  const done = outcomes.filter((outcome) => 'review' in outcome);
+  const failed = outcomes.filter((outcome) => 'stop' in outcome);
+  await saveReviews(Object.fromEntries(done.map(({ role, record }) => [role.pane.pane_id, record])));
+
+  const reviews = done.map((outcome) => outcome.review);
+  const handoff = buildHandoff(fill(config.handoffIntro, { count: reviews.length, pr: pr.number }), reviews);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const archived = await archive(`${stamp}-pr${pr.number}.md`, handoff);
+  log(`handoff archived at ${archived}`);
+  if (failed.length > 0) {
+    const finishedQa = done.map((outcome) => outcome.role);
+    const saved =
+      finishedQa.length === 0
+        ? 'No review is saved, and nothing went to Engineering.'
+        : `${names(finishedQa)}'s ${finishedQa.length === 1 ? 'review is' : 'reviews are'} saved; nothing went to Engineering.`;
+    throw new Failure(
+      failed.length === 1 ? failed[0].stop.title : `${names(failed.map((outcome) => outcome.role))} did not finish their reviews`,
+      `${saved} ${startOver}`,
+      `${detailsOf(failed.map((outcome) => outcome.stop))}\nThe reviews that finished are in ${archived}`,
+    );
+  }
+
+  const engineering = roles.engineering;
+  const engineeringLimits = limits(config.engineeringTimeoutMinutes);
+  log(`${engineering.title}: handoff, ${handoff.length} characters`);
+  try {
+    await promptUntilReady(engineering, handoff, engineeringLimits);
+  } catch (error) {
+    const message = stopMessage(engineering, error);
+    throw new Failure(message.title, `${engineering.title} has the QA feedback; check its pane. ${startOver}`, detailsOf([message]));
+  }
+  if (config.followUp) {
+    log(`${engineering.title}: ${config.followUp}`);
+    try {
+      await promptUntilReady(engineering, fill(config.followUp, { pr: pr.number }), engineeringLimits);
+    } catch (error) {
+      const message = stopMessage(engineering, error);
+      throw new Failure(
+        `${engineering.title}'s follow-up stopped: ${message.title}`,
+        `${engineering.title} has worked in the QA feedback; check its pane before you run the review relay again.`,
+        detailsOf([message]),
+      );
+    }
+  }
+  await inform(tellDeps, `${tag} is ready for you`, 'QA feedback is worked in and the follow-up has finished.', 'done');
+  log('done');
 }

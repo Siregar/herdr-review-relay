@@ -30,8 +30,8 @@ async function wait(script: Script, options = OPTIONS) {
       // A wait that never ends would hang the suite instead of failing it.
       if (now > 24 * 60 * MINUTE) throw new Error('the wait never ended');
     },
-    notify: async (title) => {
-      notices.push(title);
+    needsYou: async (message) => {
+      notices.push(message.title);
     },
     log: (message) => logs.push(message),
   };
@@ -106,7 +106,7 @@ test('wait: a blocked agent notifies once per stop, and the wait goes on after t
 
 test('wait: the deadline throws when the agent is still working', async () => {
   const result = await wait({ status: () => 'working' });
-  assert.equal(result.outcome, 'Timed out after 90 minutes');
+  assert.match(result.outcome, /^QA #1 timed out after 90 min\n/);
   assert.ok(result.minutes >= 90 && result.minutes < 91, `ended after ${result.minutes} minutes`);
 });
 

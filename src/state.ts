@@ -53,6 +53,9 @@ function isRunning(pid: number): boolean {
   }
 }
 
+const ALREADY_RUNNING = 'A review round is already running here';
+const WAIT_FOR_IT = 'Wait for its "ready" notification.';
+
 /** One relay per tab at a time. Returns the release function. */
 export async function acquireLock(tabId: string): Promise<() => Promise<void>> {
   const dir = join(STATE_DIR, 'locks');
@@ -64,7 +67,7 @@ export async function acquireLock(tabId: string): Promise<() => Promise<void>> {
     // an earlier version left when it died while taking it, is stale. Pid 0 would pass the liveness
     // check, as the caller's own process group.
     if (Number.isInteger(pid) && pid > 0 && isRunning(pid)) {
-      throw new RelayError(`A review relay is already running in this tab (pid ${pid})`);
+      throw new RelayError(ALREADY_RUNNING, WAIT_FOR_IT, `The relay with pid ${pid} holds ${path}.`);
     }
     await rm(path, { force: true });
   } catch (error) {
@@ -79,7 +82,7 @@ export async function acquireLock(tabId: string): Promise<() => Promise<void>> {
     await link(temporary, path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    throw new RelayError('A review relay started in this tab at the same moment');
+    throw new RelayError(ALREADY_RUNNING, WAIT_FOR_IT, 'Another relay started in this tab at the same moment.');
   } finally {
     await rm(temporary, { force: true });
   }
