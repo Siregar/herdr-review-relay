@@ -33,8 +33,10 @@ export const DEFAULTS: Config = {
   backgroundGraceMinutes: 30,
 };
 
+const FIX_IT = 'Fix it in `herdr plugin config-dir review-relay`.';
+
 function expect(ok: boolean, key: string, wanted: string): void {
-  if (!ok) throw new RelayError(`config.json: "${key}" must be ${wanted}`);
+  if (!ok) throw new RelayError(`config.json: "${key}" must be ${wanted}`, FIX_IT);
 }
 
 /** Overlays a parsed config.json on the defaults. Keys it does not set keep their default. */
@@ -89,6 +91,6 @@ export async function loadConfig(dir = process.env.HERDR_PLUGIN_CONFIG_DIR): Pro
     return parseConfig(JSON.parse(text));
   } catch (error) {
     if (error instanceof RelayError) throw error;
-    throw new RelayError(`config.json is not valid JSON: ${(error as Error).message}`);
+    throw new RelayError('config.json is not valid JSON', FIX_IT, (error as Error).message);
   }
 }

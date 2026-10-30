@@ -19,15 +19,28 @@ The relay only types into sessions that are already running. Model, effort and a
 ## Flow
 
 1. Press `prefix+a` in the tab.
-2. The PR is the one `gh pr view` finds for Engineering's checkout. If the branch has no PR, it is the last link Engineering wrote in its session to a PR in the checkout's repository; links to PRs in other repositories are passed over, and a session that links only those is refused. A failing gh (auth, network) stops the run with gh's error.
+2. The PR is the one `gh pr view` finds for Engineering's checkout. If the branch has no PR, it is the last link Engineering wrote in its session to a PR in the checkout's repository; links to PRs in other repositories are passed over, and a session that links only those is refused. A failing gh (auth, network) is refused as such, not as a missing PR.
 3. Each QA pane gets its review command (`reviewPrompt`). A QA pane that already reviewed in its current session gets `/clear` first.
-4. The relay waits until every QA agent is done. When one stops at a question or an approval, you get a notification, and the wait goes on once you have answered; the time it waits for you does not count against the timeout, so the relay keeps the tab until you answer. For Claude Code, done needs more than herdr reporting idle. Its transcript must also show no background task still running and a closed turn, because the agent goes idle while it waits for a background task such as a CI watch or a background sub-agent. A background shell that never reports (a dev server, a watch loop) is given up once the agent has sat idle on shells alone for `backgroundGraceMinutes`; the run log names them. Background sub-agents are waited for until the timeout, since they always report.
+4. The relay waits until every QA agent is done. When one stops at a question or an approval, you get a "needs you" notification, and the wait goes on once you have answered; the time it waits for you does not count against the timeout, so the relay keeps the tab until you answer. For Claude Code, done needs more than herdr reporting idle. Its transcript must also show no background task still running and a closed turn, because the agent goes idle while it waits for a background task such as a CI watch or a background sub-agent. A background shell that never reports (a dev server, a watch loop) is given up once the agent has sat idle on shells alone for `backgroundGraceMinutes`; the run log names them. Background sub-agents are waited for until the timeout, since they always report.
 5. Engineering gets `handoffIntro`, followed by each review in a `<review from="QA #1" agent="Claude Code">` block.
 6. Once Engineering is done, it gets `followUp`. When that has finished too, you get a "ready for you" notification.
 
 Every handoff is also kept under `$HERDR_PLUGIN_STATE_DIR/runs/`. If one QA review fails, nothing is sent to Engineering, and the reviews that did finish are in that file.
 
 `prefix+y` copies the focused agent's last reply to the clipboard, from the same records.
+
+## When the relay refuses or fails
+
+Every message names its cause in the title and one next step in the body, such as "No PR for feat/login: Have Engineering open the PR, then run the review relay again." Long paths, pane ids and gh's own output go under "Details", which only the popup shows. The plugin log (`herdr plugin log list --plugin review-relay`) has every message in full, details included.
+
+- **Refusal**: the relay declines before it has typed into any pane (no PR, no QA panes, a busy pane, gh unreachable, an invalid `config.json`). The message comes seconds after you start the relay, so it opens a popup over the tab. Enter or Esc closes it. If herdr refuses the popup, for example because Settings is open, you get a notification instead.
+- **Failure**: a review round stops after the relay has typed into a pane, such as a QA agent that timed out or ended without a review. You may have left by then, so it comes as a notification, saying what is safe and what running the relay again does. If herdr does not show the notification (`[ui.toast] delivery` is `off`, or `system` delivery found no foreground client), the popup opens instead.
+- **"needs you"** follows the Failure route: notification first, the popup when it is not shown.
+- **"review started", "ready" and "Copied"** are notifications only. One that herdr does not show is left in the log, never in a popup, since a popup takes the keyboard until you close it.
+
+Starting the relay always ends in exactly one message: a Refusal or "review started". "review started" is a notification only, so with `system` delivery it can end up in the log alone. A crash says "Review relay crashed" through the same channels, with the stack trace in the plugin log. Runs from a terminal (`--dry-run`, `--stdout`) print their messages to the terminal only.
+
+See [ADR 0001](docs/adr/0001-refusals-as-popup.md) for why a Refusal opens a popup rather than a notification.
 
 ## Setup
 

@@ -18,3 +18,10 @@ title = "Review relay: copy last reply"
 description = "Copy the focused agent's last reply to the clipboard, read from its transcript."
 contexts = ["pane"]
 command = ["node", "src/relay.ts", "copy"]
+
+# Where a Refusal shows, or a Failure that herdr did not show as a notification. See docs/adr/0001-refusals-as-popup.md.
+[[panes]]
+id = "message"
+title = "Herdr Review Relay"
+placement = "popup"
+command = ["node", "src/popup.ts"]

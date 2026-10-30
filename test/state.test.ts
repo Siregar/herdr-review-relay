@@ -4,6 +4,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
+import type { RelayError } from '../src/roles.ts';
 
 // state.ts reads its directory once, on import.
 const dir = await mkdtemp(join(tmpdir(), 'review-relay-state-'));
@@ -41,7 +42,11 @@ test('lock: an empty lock file, left by a relay that died while taking it, is st
 
 test('lock: a live relay holds the tab', async () => {
   const release = await acquireLock('tab_live');
-  await assert.rejects(acquireLock('tab_live'), /already running in this tab \(pid \d+\)/);
+  await assert.rejects(acquireLock('tab_live'), (error: RelayError) => {
+    assert.equal(error.title, 'A review round is already running here');
+    assert.match(error.details ?? '', /pid \d+/);
+    return true;
+  });
   await release();
 });
 
@@ -59,7 +64,7 @@ test('lock: of relays starting at the same moment, one wins and the others are t
     const winners = results.filter((result) => result.status === 'fulfilled');
     assert.equal(winners.length, 1);
     for (const result of results) {
-      if (result.status === 'rejected') assert.match(result.reason.message, /review relay (is already running|started) in this tab/);
+      if (result.status === 'rejected') assert.match(result.reason.message, /^A review round is already running here\n/);
     }
     await (winners[0] as PromiseFulfilledResult<() => Promise<void>>).value();
   }
