@@ -1,4 +1,4 @@
-import { HerdrError, notify, openPane, type Notified, type Sound } from './herdr.ts';
+import { HerdrError, notify, openPopup, type Notified, type PopupSize, type Sound } from './herdr.ts';
 import { RelayError } from './roles.ts';
 
 /** What the user reads when the relay stops or needs them. */
@@ -31,7 +31,7 @@ export const POPUP_MESSAGE_ENV = 'REVIEW_RELAY_MESSAGE';
 export function herdrTellDeps(log: (line: string) => void): TellDeps {
   return {
     notify,
-    popup: (message) => openPane('message', { [POPUP_MESSAGE_ENV]: JSON.stringify(message) }),
+    popup: (message) => openPopup('message', popupSize(message), { [POPUP_MESSAGE_ENV]: JSON.stringify(message) }),
     log,
   };
 }
@@ -110,10 +110,34 @@ export function closesPopup(keys: string): boolean {
   return keys === '\x1b' || keys === '\x03' || keys.includes('\r') || keys.includes('\n');
 }
 
+/** Details past this many lines, such as most of a stack trace, are left to the plugin log. */
+const MAX_DETAIL_LINES = 8;
+/** At most a classic 80×24 terminal, so the popup fits on any screen herdr runs in. */
+const MAX_WIDTH = 80;
+const MAX_HEIGHT = 24;
+/** herdr's popup border: one cell on each side. */
+const FRAME = 2;
+/** Room to the right of the longest line, so it does not touch the border. */
+const MARGIN = 2;
+
 /** What the popup prints: the cause as heading, the next step, then the details under their own heading. */
 export function renderPopup(message: Message): string {
-  const details = message.details ? [`${BOLD}Details${RESET}`, message.details, ''] : [];
+  const lines = message.details?.split('\n') ?? [];
+  const cut = lines.length > MAX_DETAIL_LINES ? [`… ${lines.length - MAX_DETAIL_LINES} more lines in the plugin log`] : [];
+  const details = message.details ? [`${BOLD}Details${RESET}`, ...lines.slice(0, MAX_DETAIL_LINES), ...cut, ''] : [];
   return [`${BOLD}${message.title}${RESET}`, '', message.nextStep, '', ...details, `${DIM}Enter or Esc to close${RESET}`, ''].join('\n');
+}
+
+/**
+ * The smallest popup that shows the whole message: as wide as its longest line, at most 80 columns,
+ * and as high as its lines once they wrap, the cursor line after the last one included.
+ */
+export function popupSize(message: Message): PopupSize {
+  const lines = renderPopup(message).replace(/\x1b\[\d+m/g, '').split('\n');
+  const width = Math.min(Math.max(...lines.map((line) => line.length)) + FRAME + MARGIN, MAX_WIDTH);
+  const columns = width - FRAME;
+  const rows = lines.reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / columns)), 0);
+  return { width, height: Math.min(rows + FRAME, MAX_HEIGHT) };
 }
 
 /** The message as plain text, for the log and the terminal. */

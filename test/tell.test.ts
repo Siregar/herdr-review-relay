@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { HerdrError, type Notified } from '../src/herdr.ts';
 import { RelayError } from '../src/roles.ts';
-import { closesPopup, inform, messageOf, renderPopup, tell, type Message, type TellDeps } from '../src/tell.ts';
+import { closesPopup, inform, messageOf, popupSize, renderPopup, tell, type Message, type TellDeps } from '../src/tell.ts';
 
 const MESSAGE: Message = {
   title: 'No PR for feat/login',
@@ -166,4 +166,24 @@ test('no message names a key: keybindings are the user\'s own', async () => {
 test('popup: Enter, Esc and Ctrl-C close it; an arrow key, which starts with Esc too, does not', () => {
   for (const keys of ['\r', '\n', '\x1b', '\x03']) assert.equal(closesPopup(keys), true, JSON.stringify(keys));
   for (const keys of ['\x1b[A', 'q', ' ']) assert.equal(closesPopup(keys), false, JSON.stringify(keys));
+});
+
+test('popup size: the popup fits its message, plus the frame and the cursor line', () => {
+  // The longest line is the next step, 62 characters; the message renders as 8 lines and the cursor line.
+  assert.deepEqual(popupSize(MESSAGE), { width: 66, height: 11 });
+});
+
+test('popup size: a long line wraps inside 80 columns, and the height counts the wrapped lines', () => {
+  const nextStep = 'x'.repeat(200);
+  // Inside the frame, 200 characters in 78 columns take 3 lines: 7 lines in all, the cursor line, and the frame.
+  assert.deepEqual(popupSize({ title: 'No QA panes in this tab', nextStep }), { width: 80, height: 10 });
+});
+
+test('popup: long details, such as a stack trace, are cut to keep the cause on screen', () => {
+  const details = Array.from({ length: 30 }, (_, line) => `    at frame ${line}`).join('\n');
+  const text = renderPopup({ title: 'Review relay crashed', nextStep: 'This is a bug.', details });
+  assert.match(text, /at frame 7\n/);
+  assert.doesNotMatch(text, /at frame 8\n/);
+  assert.match(text, /… 22 more lines in the plugin log/);
+  assert.ok(popupSize({ title: 'Review relay crashed', nextStep: 'This is a bug.', details }).height <= 24);
 });

@@ -78,6 +78,7 @@ test('relay: a Refusal from a keybinding opens the popup with the message, and s
   const [popup, ...more] = popups(started);
   assert.deepEqual(more, []);
   assert.deepEqual(popup.slice(0, 7), ['plugin', 'pane', 'open', '--plugin', 'review-relay', '--entrypoint', 'message']);
+  assert.deepEqual(popup.slice(7, 11), ['--width', '78', '--height', '11'], 'the popup is sized to the message');
   assert.equal(popupMessage(popup).title, 'No QA panes in this tab');
   assert.deepEqual(notifications(started), []);
   assert.match(started.stderr, /No QA panes in this tab/, 'the plugin log has it too');
@@ -88,7 +89,7 @@ test('relay: a Refusal falls back to a notification when herdr refuses the popup
   assert.equal(started.code, 1);
   const [notification] = notifications(started);
   assert.equal(notification[2], 'No QA panes in this tab');
-  assert.equal(notification[4], 'Label each QA pane "QA #1", "QA #2", … (right-click > Rename).');
+  assert.equal(notification[4], 'Rename each QA pane to exactly "QA #1", "QA #2", … (right-click > Rename).');
   assert.match(started.stderr, /ui_busy|a herdr modal is open/);
 });
 

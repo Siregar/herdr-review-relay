@@ -24,6 +24,4 @@ command = ["node", "src/relay.ts", "copy"]
 id = "message"
 title = "Review relay"
 placement = "popup"
-width = "80%"
-height = "60%"
 command = ["node", "src/popup.ts"]

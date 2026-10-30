@@ -91,7 +91,12 @@ export function resolveRoles(panes: Pane[], invokingPaneId: string, labels: Role
     numbered.set(number, pane);
   }
   if (numbered.size === 0) {
-    throw new RelayError('No QA panes in this tab', 'Label each QA pane "QA #1", "QA #2", … (right-click > Rename).');
+    const labelled = tab.map((pane) => (labelOf(pane) ? `"${labelOf(pane)}"` : '(no label)')).join(', ');
+    throw new RelayError(
+      'No QA panes in this tab',
+      'Rename each QA pane to exactly "QA #1", "QA #2", … (right-click > Rename).',
+      `Labels in this tab: ${labelled}. A QA label must match ${labels.qaPattern}.`,
+    );
   }
 
   const qa = [...numbered.entries()]

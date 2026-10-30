@@ -42,8 +42,13 @@ test('starting the relay in a QA pane without an Engineering label is refused', 
   assert.throws(() => resolveRoles([pane('p1', null), pane('p2', 'QA #1')], 'p2', LABELS), { title: 'This is a QA pane' });
 });
 
-test('a tab without QA panes is refused', () => {
-  assert.throws(() => resolveRoles([pane('p1', null), pane('p2', 'notes')], 'p1', LABELS), { title: 'No QA panes in this tab' });
+test('a tab without QA panes is refused, with the exact labels it needs and the ones it has', () => {
+  const panes = [pane('p1', 'Engineering'), pane('p2', 'QA1'), pane('p3', null), pane('x1', 'QA #1', 'claude', 't2')];
+  assert.throws(() => resolveRoles(panes, 'p1', LABELS), {
+    title: 'No QA panes in this tab',
+    nextStep: 'Rename each QA pane to exactly "QA #1", "QA #2", … (right-click > Rename).',
+    details: 'Labels in this tab: "Engineering", "QA1", (no label). A QA label must match ^QA #(\\d+)$.',
+  });
 });
 
 test('two panes with the same QA number are refused', () => {
